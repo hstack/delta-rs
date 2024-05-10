@@ -44,6 +44,8 @@ use datafusion::datasource::file_format::{parquet::ParquetFormat, FileFormat};
 use datafusion::datasource::physical_plan::{
     wrap_partition_type_in_dict, wrap_partition_value_in_dict, FileScanConfig,
 };
+
+use datafusion::common::Result;
 use datafusion::datasource::provider::TableProviderFactory;
 use datafusion::datasource::{listing::PartitionedFile, MemTable, TableProvider, TableType};
 use datafusion::execution::context::{SessionConfig, SessionContext, SessionState, TaskContext};
@@ -641,6 +643,7 @@ impl<'a> DeltaScanBuilder<'a> {
                     limit: self.limit,
                     table_partition_cols,
                     output_ordering: vec![],
+                    column_hints: None
                 },
                 parquet_pushdown.as_ref(),
             )
@@ -698,11 +701,11 @@ impl TableProvider for DeltaTable {
         Ok(Arc::new(scan))
     }
 
-    fn supports_filter_pushdown(
+    fn supports_filters_pushdown(
         &self,
-        _filter: &Expr,
-    ) -> DataFusionResult<TableProviderFilterPushDown> {
-        Ok(TableProviderFilterPushDown::Inexact)
+        filters: &[&datafusion_expr::Expr],
+    ) -> Result<Vec<TableProviderFilterPushDown>> {
+        Ok(vec![TableProviderFilterPushDown::Inexact; filters.len()])
     }
 
     fn statistics(&self) -> Option<Statistics> {
@@ -777,11 +780,11 @@ impl TableProvider for DeltaTableProvider {
         Ok(Arc::new(scan))
     }
 
-    fn supports_filter_pushdown(
+    fn supports_filters_pushdown(
         &self,
-        _filter: &Expr,
-    ) -> DataFusionResult<TableProviderFilterPushDown> {
-        Ok(TableProviderFilterPushDown::Inexact)
+        _filter: &[&datafusion_expr::Expr],
+    ) -> DataFusionResult<Vec<TableProviderFilterPushDown>> {
+        Ok(vec![TableProviderFilterPushDown::Inexact; _filter.len()])
     }
 
     fn statistics(&self) -> Option<Statistics> {
@@ -1425,7 +1428,6 @@ impl TreeNodeVisitor for FindFilesExprProperties {
             | Expr::TryCast(_) => (),
             Expr::ScalarFunction(ScalarFunction { func_def, .. }) => {
                 let v = match func_def {
-                    datafusion_expr::ScalarFunctionDefinition::BuiltIn(f) => f.volatility(),
                     datafusion_expr::ScalarFunctionDefinition::UDF(u) => u.signature().volatility,
                     datafusion_expr::ScalarFunctionDefinition::Name(n) => {
                         self.result = Err(DeltaTableError::Generic(format!(
