@@ -328,8 +328,10 @@ async fn execute(
         if !control_columns.contains(field.name()) {
             match map.get(field.name()) {
                 Some(value) => {
+                    println!("value1: {}", field.name());
+                    let field_ref = scan_schema.fields()[*value].clone();
                     expressions.push((
-                        Arc::new(expressions::Column::new(field.name(), *value)),
+                        Arc::new(expressions::Column::new(field_ref.name(), *value)),
                         field.name().to_owned(),
                     ));
                 }

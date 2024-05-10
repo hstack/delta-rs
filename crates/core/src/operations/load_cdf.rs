@@ -269,6 +269,7 @@ impl CdfLoadBuilder {
                     limit: None,
                     table_partition_cols: cdc_partition_cols,
                     output_ordering: vec![],
+                    column_hints: None
                 },
                 None,
             )
@@ -286,6 +287,7 @@ impl CdfLoadBuilder {
                     limit: None,
                     table_partition_cols: add_partition_cols,
                     output_ordering: vec![],
+                    column_hints: None
                 },
                 None,
             )

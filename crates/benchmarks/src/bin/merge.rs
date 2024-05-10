@@ -7,9 +7,9 @@ use arrow::datatypes::Schema as ArrowSchema;
 use arrow_array::{RecordBatch, StringArray, UInt32Array};
 use chrono::Duration;
 use clap::{command, Args, Parser, Subcommand};
-use datafusion::{datasource::MemTable, prelude::DataFrame};
+use datafusion::{datasource::MemTable, functions::math, prelude::DataFrame};
 use datafusion_common::DataFusionError;
-use datafusion_expr::{cast, col, lit, random};
+use datafusion_expr::{cast, col, expr::ScalarFunction, lit, ColumnarValue, Expr};
 use deltalake_core::protocol::SaveMode;
 use deltalake_core::{
     arrow::{
@@ -187,6 +187,11 @@ fn merge_delete(source: DataFrame, table: DeltaTable) -> Result<MergeBuilder, De
         })
 }
 
+fn random() -> Expr {
+    let fun = math::random();
+    Expr::ScalarFunction(ScalarFunction::new_udf(fun, vec![]))
+}
+
 async fn benchmark_merge_tpcds(
     path: String,
     parameters: MergePerfParams,
@@ -207,6 +212,8 @@ async fn benchmark_merge_tpcds(
 
     let ctx = SessionContext::new();
     ctx.register_table("t1", Arc::new(provider))?;
+
+
 
     let files = ctx
         .sql("select file_path as file from t1 group by file")

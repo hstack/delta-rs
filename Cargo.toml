@@ -15,6 +15,18 @@ license = "Apache-2.0"
 documentation = "https://docs.rs/deltalake"
 repository = "https://github.com/delta-io/delta.rs"
 
+[profile.idea]
+inherits = "dev"
+opt-level = 0
+debug = 2
+split-debuginfo = "packed"
+strip = "none"
+debug-assertions = true
+overflow-checks = false
+incremental = true
+codegen-units = 256
+lto = "off"
+
 [profile.release-with-debug]
 inherits = "release"
 debug = true
@@ -42,14 +54,14 @@ object_store = { version = "0.9" }
 parquet = { version = "51" }
 
 # datafusion
-datafusion = { version = "37.1" }
-datafusion-expr = { version = "37.1" }
-datafusion-common = { version = "37.1" }
-datafusion-proto = { version = "37.1" }
-datafusion-sql = { version = "37.1" }
-datafusion-physical-expr = { version = "37.1" }
-datafusion-functions = { version = "37.1" }
-datafusion-functions-array = { version = "37.1" }
+datafusion = { version = "38.0.0" }
+datafusion-expr = { version = "38.0.0" }
+datafusion-common = { version = "38.0.0" }
+datafusion-proto = { version = "38.0.0" }
+datafusion-sql = { version = "38.0.0" }
+datafusion-physical-expr = { version = "38.0.0" }
+datafusion-functions = { version = "38.0.0" }
+datafusion-functions-array = { version = "38.0.0" }
 
 # serde
 serde = { version = "1.0.194", features = ["derive"] }
@@ -69,3 +81,18 @@ async-trait = { version = "0.1" }
 futures = { version = "0.3" }
 tokio = { version = "1" }
 num_cpus = { version = "1" }
+
+[patch.crates-io]
+datafusion = { git="https://github.com/hstack/arrow-datafusion.git", branch="branch-38" }
+datafusion-common = { git="https://github.com/hstack/arrow-datafusion.git", branch="branch-38" }
+datafusion-common-runtime = { git="https://github.com/hstack/arrow-datafusion.git", branch="branch-38" }
+datafusion-execution = { git="https://github.com/hstack/arrow-datafusion.git", branch="branch-38" }
+datafusion-expr = { git="https://github.com/hstack/arrow-datafusion.git", branch="branch-38" }
+datafusion-functions = { git="https://github.com/hstack/arrow-datafusion.git", branch="branch-38" }
+datafusion-functions-array = { git="https://github.com/hstack/arrow-datafusion.git", branch="branch-38" }
+datafusion-optimizer = { git="https://github.com/hstack/arrow-datafusion.git", branch="branch-38" }
+datafusion-physical-expr = { git="https://github.com/hstack/arrow-datafusion.git", branch="branch-38" }
+datafusion-physical-plan = { git="https://github.com/hstack/arrow-datafusion.git", branch="branch-38" }
+datafusion-proto = { git="https://github.com/hstack/arrow-datafusion.git", branch="branch-38" }
+datafusion-sql = { git="https://github.com/hstack/arrow-datafusion.git", branch="branch-38" }
+datafusion-substrait = { git="https://github.com/hstack/arrow-datafusion.git", branch="branch-38" }
