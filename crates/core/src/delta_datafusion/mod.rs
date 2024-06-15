@@ -82,6 +82,7 @@ use futures::TryStreamExt;
 use itertools::Itertools;
 use object_store::ObjectMeta;
 use serde::{Deserialize, Serialize};
+use tracing::log::info;
 use url::Url;
 
 use crate::delta_datafusion::expr::parse_predicate_expression;
@@ -514,12 +515,17 @@ impl<'a> DeltaScanBuilder<'a> {
         let schema = match self.schema {
             Some(schema) => schema,
             None => {
-                self.snapshot
-                    .physical_arrow_schema(self.log_store.object_store())
-                    .await?
+                info!(target: "TASE", "PHYSYCAL");
+                // self.snapshot
+                //     .physical_arrow_schema(self.log_store.object_store())
+                //     .await?
+                df_logical_schema(self.snapshot, &config)?
             }
         };
+        info!(target: "TASE", "DeltaScan build schema: {}", schema);
+
         let logical_schema = df_logical_schema(self.snapshot, &config)?;
+        info!(target: "TASE", "DeltaScan build LOGICAL schema: {}", logical_schema);
 
         let logical_schema = if let Some(used_columns) = self.projection {
             let mut fields = vec![];
@@ -530,6 +536,7 @@ impl<'a> DeltaScanBuilder<'a> {
         } else {
             logical_schema
         };
+        info!(target: "TASE", "DeltaScan build LOGICAL PROJ schema: {}", logical_schema);
 
         let logical_filter = self
             .filter
@@ -596,6 +603,7 @@ impl<'a> DeltaScanBuilder<'a> {
                 .cloned()
                 .collect::<Vec<arrow::datatypes::FieldRef>>(),
         ));
+        info!(target: "TASE", "DeltaScan build FILE schema: {}", file_schema);
 
         let mut table_partition_cols = table_partition_cols
             .iter()

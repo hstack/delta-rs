@@ -13,6 +13,7 @@ use itertools::Itertools;
 use object_store::ObjectStore;
 use parquet::arrow::arrow_reader::ArrowReaderOptions;
 use parquet::arrow::async_reader::{ParquetObjectReader, ParquetRecordBatchStreamBuilder};
+use tracing::log::info;
 
 use crate::delta_datafusion::{
     get_null_of_arrow_type, logical_expr_to_physical_expr, to_correct_scalar_value,
@@ -47,8 +48,11 @@ impl DeltaTableState {
             .schema()
             .clone();
 
+            let arrow_schema = self.arrow_schema()?;
+            info!(target: "TASE", "DeltaScan physical_arrow_schema INPUT: {}", arrow_schema);
+
             let table_schema = Arc::new(ArrowSchema::new(
-                self.arrow_schema()?
+                arrow_schema
                     .fields
                     .clone()
                     .into_iter()
@@ -63,6 +67,7 @@ impl DeltaTableState {
                     })
                     .collect::<Vec<ArrowField>>(),
             ));
+            info!(target: "TASE", "DeltaScan physical_arrow_schema OUTPUT: {}", table_schema);
 
             Ok(table_schema)
         } else {
