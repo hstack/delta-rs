@@ -73,6 +73,7 @@ use futures::TryStreamExt;
 use itertools::Itertools;
 use object_store::ObjectMeta;
 use serde::{Deserialize, Serialize};
+use tracing::log::info;
 use url::Url;
 
 use crate::delta_datafusion::expr::parse_predicate_expression;
@@ -190,34 +191,38 @@ impl DataFusionMixins for DeltaTableState {
 
 fn _arrow_schema(snapshot: &Snapshot, wrap_partitions: bool) -> DeltaResult<ArrowSchemaRef> {
     let meta = snapshot.metadata();
-    let fields = meta
-        .schema()?
+
+    let schema = meta.schema()?;
+    let fields = schema
         .fields()
         .filter(|f| !meta.partition_columns.contains(&f.name().to_string()))
         .map(|f| f.try_into())
         .chain(
-            meta.schema()?
-                .fields()
-                .filter(|f| meta.partition_columns.contains(&f.name().to_string()))
-                .map(|f| {
-                    let field = Field::try_from(f)?;
-                    let corrected = if wrap_partitions {
-                        match field.data_type() {
-                            // Only dictionary-encode types that may be large
-                            // // https://github.com/apache/arrow-datafusion/pull/5545
-                            DataType::Utf8
-                            | DataType::LargeUtf8
-                            | DataType::Binary
-                            | DataType::LargeBinary => {
-                                wrap_partition_type_in_dict(field.data_type().clone())
-                            }
-                            _ => field.data_type().clone(),
+            // @DeltaDatafusionDeepSchema
+            // FIXME: the code here was recomputing the partition columns from the schema, and they
+            // were in a different order.
+            // Since we already have the partition columns, just use them as they have been
+            // computed at a previous step
+            meta.partition_columns.iter().map(|partition_col| {
+                let f = schema.field(partition_col).unwrap();
+                let field = Field::try_from(f)?;
+                let corrected = if wrap_partitions {
+                    match field.data_type() {
+                        // Only dictionary-encode types that may be large
+                        // // https://github.com/apache/arrow-datafusion/pull/5545
+                        DataType::Utf8
+                        | DataType::LargeUtf8
+                        | DataType::Binary
+                        | DataType::LargeBinary => {
+                            wrap_partition_type_in_dict(field.data_type().clone())
                         }
-                    } else {
-                        field.data_type().clone()
-                    };
-                    Ok(field.with_data_type(corrected))
-                }),
+                        _ => field.data_type().clone(),
+                    }
+                } else {
+                    field.data_type().clone()
+                };
+                Ok(field.with_data_type(corrected))
+            })
         )
         .collect::<Result<Vec<Field>, _>>()?;
 
@@ -511,11 +516,16 @@ impl<'a> DeltaScanBuilder<'a> {
         let schema = match self.schema {
             Some(schema) => schema,
             None => {
-                self.snapshot
-                    .physical_arrow_schema(self.log_store.object_store())
-                    .await?
+                // @DeltaDatafusionDeepSchema
+                // FIXME: This is because the physical arrow schema is DIFFERENT from the logical
+                // schema, so we use the logical schema
+                // self.snapshot
+                //     .physical_arrow_schema(self.log_store.object_store())
+                //     .await?
+                df_logical_schema(self.snapshot, &config)?
             }
         };
+
         let logical_schema = df_logical_schema(self.snapshot, &config)?;
 
         let logical_schema = if let Some(used_columns) = self.projection {
