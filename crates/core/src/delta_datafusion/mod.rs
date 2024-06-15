@@ -200,36 +200,33 @@ impl DataFusionMixins for DeltaTableState {
 
 fn _arrow_schema(snapshot: &Snapshot, wrap_partitions: bool) -> DeltaResult<ArrowSchemaRef> {
     let meta = snapshot.metadata();
-    let fields = meta
-        .schema()?
+    let schema = meta.schema()?;
+    let fields = schema.clone()
         .fields()
         .iter()
         .filter(|f| !meta.partition_columns.contains(&f.name().to_string()))
         .map(|f| f.try_into())
         .chain(
-            meta.schema()?
-                .fields()
-                .iter()
-                .filter(|f| meta.partition_columns.contains(&f.name().to_string()))
-                .map(|f| {
-                    let field = Field::try_from(f)?;
-                    let corrected = if wrap_partitions {
-                        match field.data_type() {
-                            // Only dictionary-encode types that may be large
-                            // // https://github.com/apache/arrow-datafusion/pull/5545
-                            DataType::Utf8
-                            | DataType::LargeUtf8
-                            | DataType::Binary
-                            | DataType::LargeBinary => {
-                                wrap_partition_type_in_dict(field.data_type().clone())
-                            }
-                            _ => field.data_type().clone(),
+            meta.partition_columns.iter().map(|partition_col| {
+                let f = schema.field_with_name(partition_col).unwrap();
+                let field = Field::try_from(f)?;
+                let corrected = if wrap_partitions {
+                    match field.data_type() {
+                        // Only dictionary-encode types that may be large
+                        // // https://github.com/apache/arrow-datafusion/pull/5545
+                        DataType::Utf8
+                        | DataType::LargeUtf8
+                        | DataType::Binary
+                        | DataType::LargeBinary => {
+                            wrap_partition_type_in_dict(field.data_type().clone())
                         }
-                    } else {
-                        field.data_type().clone()
-                    };
-                    Ok(field.with_data_type(corrected))
-                }),
+                        _ => field.data_type().clone(),
+                    }
+                } else {
+                    field.data_type().clone()
+                };
+                Ok(field.with_data_type(corrected))
+            })
         )
         .collect::<Result<Vec<Field>, _>>()?;
 
