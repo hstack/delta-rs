@@ -147,7 +147,7 @@ pub trait DataFusionMixins {
 
 impl DataFusionMixins for Snapshot {
     fn arrow_schema(&self) -> DeltaResult<ArrowSchemaRef> {
-        _arrow_schema(self, true)
+        _arrow_schema(self, false)
     }
 
     fn input_schema(&self) -> DeltaResult<ArrowSchemaRef> {
