@@ -196,6 +196,9 @@ impl DisplayAs for CDCObserver {
 }
 
 impl ExecutionPlan for CDCObserver {
+
+    fn name(&self) -> &str { "CDCObserver" }
+
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -249,6 +252,7 @@ impl ExecutionPlan for CDCObserver {
     fn metrics(&self) -> Option<MetricsSet> {
         self.parent.metrics()
     }
+
 }
 
 /// The CDCObserverStream simply acts to help observe the stream of data being

@@ -67,6 +67,8 @@ impl MergeBarrierExec {
 }
 
 impl ExecutionPlan for MergeBarrierExec {
+    fn name(&self) -> &str { "MergeBarrierExec" }
+
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }

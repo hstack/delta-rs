@@ -57,10 +57,7 @@ use datafusion::physical_plan::{
 };
 use datafusion_common::scalar::ScalarValue;
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion, TreeNodeVisitor};
-use datafusion_common::{
-    config::ConfigOptions, Column, DFSchema, DataFusionError, Result as DataFusionResult,
-    ToDFSchema,
-};
+use datafusion_common::{config::ConfigOptions, Column, DFSchema, DataFusionError, Result as DataFusionResult, ToDFSchema, TableReference};
 use datafusion_expr::logical_plan::CreateExternalTable;
 use datafusion_expr::utils::conjunction;
 use datafusion_expr::{col, Expr, Extension, LogicalPlan, TableProviderFilterPushDown, Volatility};
@@ -887,6 +884,9 @@ impl DisplayAs for DeltaScan {
 }
 
 impl ExecutionPlan for DeltaScan {
+
+    fn name(&self) -> &str { "DeltaScan" }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -949,6 +949,7 @@ impl ExecutionPlan for DeltaScan {
             Ok(None)
         }
     }
+
 }
 
 pub(crate) fn get_null_of_arrow_type(t: &ArrowDataType) -> DeltaResult<ScalarValue> {
@@ -1351,6 +1352,7 @@ impl LogicalExtensionCodec for DeltaLogicalCodec {
     fn try_decode_table_provider(
         &self,
         buf: &[u8],
+        _table_ref: &TableReference,
         _schema: SchemaRef,
         _ctx: &SessionContext,
     ) -> Result<Arc<dyn TableProvider>, DataFusionError> {
@@ -1361,6 +1363,7 @@ impl LogicalExtensionCodec for DeltaLogicalCodec {
 
     fn try_encode_table_provider(
         &self,
+        _table_ref: &TableReference,
         node: Arc<dyn TableProvider>,
         buf: &mut Vec<u8>,
     ) -> Result<(), DataFusionError> {

@@ -74,6 +74,8 @@ impl DisplayAs for MetricObserverExec {
 }
 
 impl ExecutionPlan for MetricObserverExec {
+    fn name(&self) -> &str { "MetricObserverExec" }
+
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -118,6 +120,7 @@ impl ExecutionPlan for MetricObserverExec {
     fn metrics(&self) -> Option<MetricsSet> {
         Some(self.metrics.clone_inner())
     }
+
 }
 
 struct MetricObserverStream {

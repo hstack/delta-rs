@@ -26,6 +26,8 @@ impl DisplayAs for DeltaCdfScan {
 }
 
 impl ExecutionPlan for DeltaCdfScan {
+    fn name(&self) -> &str { "DeltaCdfScan" }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
