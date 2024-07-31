@@ -746,7 +746,8 @@ impl TableProvider for DeltaTable {
         &self,
         _filter: &[&Expr],
     ) -> DataFusionResult<Vec<TableProviderFilterPushDown>> {
-        Ok(vec![TableProviderFilterPushDown::Inexact])
+        Ok(_filter.iter().map(|_f| TableProviderFilterPushDown::Inexact).collect::<Vec<_>>())
+        // Ok(vec![TableProviderFilterPushDown::Inexact])
     }
 
     fn statistics(&self) -> Option<Statistics> {
@@ -848,7 +849,7 @@ impl TableProvider for DeltaTableProvider {
         &self,
         _filter: &[&Expr],
     ) -> DataFusionResult<Vec<TableProviderFilterPushDown>> {
-        Ok(vec![TableProviderFilterPushDown::Inexact])
+        Ok(_filter.iter().map(|_f| TableProviderFilterPushDown::Inexact).collect::<Vec<_>>())
     }
 
     fn statistics(&self) -> Option<Statistics> {
