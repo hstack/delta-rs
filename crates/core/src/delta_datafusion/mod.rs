@@ -587,6 +587,16 @@ impl<'a> DeltaScanBuilder<'a> {
             }
         };
 
+        // FIXME: demo only, allows us to query MANY files
+        let max_files_count = std::env::var("DELTA_MAX_FILES_COUNT")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok());
+        let files = match max_files_count {
+            Some(max) => files.iter().take(max).cloned().collect(),
+            None => files,
+        };
+
+
         // TODO we group files together by their partition values. If the table is partitioned
         // and partitions are somewhat evenly distributed, probably not the worst choice ...
         // However we may want to do some additional balancing in case we are far off from the above.
