@@ -75,3 +75,27 @@ async-trait = { version = "0.1" }
 futures = { version = "0.3" }
 tokio = { version = "1" }
 num_cpus = { version = "1" }
+
+[patch.crates-io]
+datafusion = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
+datafusion-catalog = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
+datafusion-common = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
+datafusion-common-runtime = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
+datafusion-execution = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
+datafusion-expr = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
+datafusion-expr-common = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
+datafusion-functions = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
+datafusion-functions-aggregate = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
+datafusion-functions-aggregate-common = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
+datafusion-functions-nested = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
+datafusion-functions-window = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
+datafusion-optimizer = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
+datafusion-physical-expr = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
+datafusion-physical-expr-common = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
+datafusion-physical-expr-functions-aggregate = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
+datafusion-physical-optimizer = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
+datafusion-physical-plan = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
+datafusion-proto = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
+datafusion-proto-common = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
+datafusion-sql = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
+datafusion-substrait = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
