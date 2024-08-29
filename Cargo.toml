@@ -15,6 +15,18 @@ license = "Apache-2.0"
 documentation = "https://docs.rs/deltalake"
 repository = "https://github.com/delta-io/delta.rs"
 
+[profile.idea]
+inherits = "dev"
+opt-level = 0
+debug = 2
+split-debuginfo = "unpacked"
+strip = "none"
+debug-assertions = true
+overflow-checks = false
+incremental = true
+codegen-units = 256
+lto = "off"
+
 [profile.release-with-debug]
 inherits = "release"
 debug = true
@@ -29,24 +41,31 @@ debug = "line-tables-only"
 delta_kernel = { version = "0.11.0", features = ["arrow-55", "internal-api"] }
 
 # arrow
-arrow = { version = "=55.0.0" }
-arrow-arith = { version = "=55.0.0" }
-arrow-array = { version = "=55.0.0", features = ["chrono-tz"] }
-arrow-buffer = { version = "=55.0.0" }
-arrow-cast = { version = "=55.0.0" }
-arrow-ipc = { version = "=55.0.0" }
-arrow-json = { version = "=55.0.0" }
-arrow-ord = { version = "=55.0.0" }
-arrow-row = { version = "=55.0.0" }
-arrow-schema = { version = "=55.0.0" }
-arrow-select = { version = "=55.0.0" }
+arrow = { version = "55" }
+arrow-arith = { version = "55" }
+arrow-array = { version = "55", features = ["chrono-tz"] }
+arrow-buffer = { version = "55" }
+arrow-cast = { version = "55" }
+arrow-ipc = { version = "55", features = ["zstd"] }
+arrow-json = { version = "55" }
+arrow-ord = { version = "55" }
+arrow-row = { version = "55" }
+arrow-schema = { version = "55" }
+arrow-select = { version = "55" }
 object_store = { version = "0.12.1" }
-parquet = { version = "=55.0.0" }
+parquet = { version = "55" }
 
 # datafusion
 datafusion = "47.0.0"
+datafusion-expr = "47.0.0"
+datafusion-common = "47.0.0"
 datafusion-ffi = "47.0.0"
+datafusion-functions = "47.0.0"
+datafusion-functions-aggregate = "47.0.0"
+datafusion-physical-expr = "47.0.0"
+datafusion-physical-plan = "47.0.0"
 datafusion-proto = "47.0.0"
+datafusion-sql = "47.0.0"
 
 # serde
 serde = { version = "1.0.194", features = ["derive"] }
@@ -88,3 +107,52 @@ Arro3 = "Arro3"
 AKS = "AKS"
 # to avoid using 'type' as a field name.
 tpe = "tpe"
+
+[patch.crates-io]
+# TODO: remove after version bump to 55.2.0
+# temporary pinning arrow to get this patch:
+# https://github.com/apache/arrow-rs/commit/e9df239980baa6d0f7eb4384eb01078bdd9b1701
+
+arrow-select = { git = 'https://github.com/apache/arrow-rs.git', rev = 'e9df239980baa6d0f7eb4384eb01078bdd9b1701' }
+arrow-cast = { git = 'https://github.com/apache/arrow-rs.git', rev = 'e9df239980baa6d0f7eb4384eb01078bdd9b1701' }
+arrow-string = { git = 'https://github.com/apache/arrow-rs.git', rev = 'e9df239980baa6d0f7eb4384eb01078bdd9b1701' }
+arrow-ord = { git = 'https://github.com/apache/arrow-rs.git', rev = 'e9df239980baa6d0f7eb4384eb01078bdd9b1701' }
+arrow-json = { git = 'https://github.com/apache/arrow-rs.git', rev = 'e9df239980baa6d0f7eb4384eb01078bdd9b1701' }
+arrow-csv = { git = 'https://github.com/apache/arrow-rs.git', rev = 'e9df239980baa6d0f7eb4384eb01078bdd9b1701' }
+arrow-schema = { git = 'https://github.com/apache/arrow-rs.git', rev = 'e9df239980baa6d0f7eb4384eb01078bdd9b1701' }
+arrow-array = { git = 'https://github.com/apache/arrow-rs.git', rev = 'e9df239980baa6d0f7eb4384eb01078bdd9b1701' }
+arrow-buffer = { git = 'https://github.com/apache/arrow-rs.git', rev = 'e9df239980baa6d0f7eb4384eb01078bdd9b1701' }
+arrow-data = { git = 'https://github.com/apache/arrow-rs.git', rev = 'e9df239980baa6d0f7eb4384eb01078bdd9b1701' }
+arrow-arith = { git = 'https://github.com/apache/arrow-rs.git', rev = 'e9df239980baa6d0f7eb4384eb01078bdd9b1701' }
+
+datafusion = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
+datafusion-catalog = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
+datafusion-catalog-listing = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
+datafusion-common = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
+datafusion-common-runtime = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
+datafusion-datasource = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
+datafusion-datasource-avro = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
+datafusion-datasource-csv = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
+datafusion-datasource-json = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
+datafusion-datasource-parquet = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
+datafusion-execution = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
+datafusion-expr = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
+datafusion-expr-common = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
+datafusion-ffi = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
+datafusion-functions = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
+datafusion-functions-aggregate = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
+datafusion-functions-aggregate-common = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
+datafusion-functions-nested = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
+datafusion-functions-table = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
+datafusion-functions-window = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
+datafusion-functions-window-common = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
+datafusion-optimizer = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
+datafusion-physical-expr = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
+datafusion-physical-expr-common = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
+datafusion-physical-optimizer = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
+datafusion-physical-plan = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
+datafusion-proto = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
+datafusion-proto-common = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
+datafusion-session = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
+datafusion-sql = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
+datafusion-substrait = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
