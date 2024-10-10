@@ -41,7 +41,7 @@ use datafusion::catalog::{Session, TableProviderFactory};
 use datafusion::config::TableParquetOptions;
 use datafusion::datasource::physical_plan::parquet::ParquetExecBuilder;
 use datafusion::datasource::physical_plan::{
-    wrap_partition_type_in_dict, wrap_partition_value_in_dict, FileScanConfig,
+    wrap_partition_type_in_dict, wrap_partition_value_in_dict, FileScanConfig, ParquetExec,
 };
 use datafusion::datasource::{listing::PartitionedFile, MemTable, TableProvider, TableType};
 use datafusion::execution::context::{SessionConfig, SessionContext, SessionState, TaskContext};
@@ -1398,9 +1398,18 @@ impl PhysicalExtensionCodec for DeltaPhysicalCodec {
     ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
         let wire: DeltaScanWire = serde_json::from_reader(buf)
             .map_err(|_| DataFusionError::Internal("Unable to decode DeltaScan".to_string()))?;
+
+        let mut parquet_scan = (*inputs)[0].clone();
+        if let Some(exec) = parquet_scan.as_any().downcast_ref::<ParquetExec>() {
+            let with_adapter_factory = exec
+                .clone()
+                .with_schema_adapter_factory(Arc::new(DeltaSchemaAdapterFactory {}));
+            parquet_scan = Arc::new(with_adapter_factory);
+        }
+
         let delta_scan = DeltaScan {
             table_uri: wire.table_uri,
-            parquet_scan: (*inputs)[0].clone(),
+            parquet_scan: parquet_scan,
             config: wire.config,
             logical_schema: wire.logical_schema,
             metrics: ExecutionPlanMetricsSet::new(),
