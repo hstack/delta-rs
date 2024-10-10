@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::fmt::{self, Debug, Display};
 use std::sync::Arc;
 
@@ -6,7 +7,7 @@ use datafusion_expr::logical_plan::LogicalPlan;
 use datafusion_expr::{Expr, UserDefinedLogicalNodeCore};
 
 /// Delta Lake specific operations
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Hash)]
 pub enum DeltaStatement {
     /// Get provenance information, including the operation,
     /// user, and so on, for each write to a table.
@@ -145,6 +146,13 @@ impl Vacuum {
     }
 }
 
+impl PartialOrd for Vacuum {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        self.table.partial_cmp(&other.table)
+    }
+}
+
+
 /// Logical Plan for [DescribeHistory] operation.
 ///
 /// [DescribeHistory]: https://learn.microsoft.com/en-us/azure/databricks/sql/language-manual/delta-describe-history
@@ -154,6 +162,12 @@ pub struct DescribeHistory {
     pub table: TableReference,
     /// Schema for commit provenence information
     pub schema: DFSchemaRef,
+}
+
+impl PartialOrd for DescribeHistory {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        self.table.partial_cmp(&other.table)
+    }
 }
 
 impl DescribeHistory {
@@ -186,6 +200,12 @@ impl DescribeDetails {
     }
 }
 
+impl PartialOrd for DescribeDetails {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        self.table.partial_cmp(&other.table)
+    }
+}
+
 /// Logical Plan for DescribeFiles operation.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct DescribeFiles {
@@ -202,6 +222,12 @@ impl DescribeFiles {
             // TODO: add proper schema
             schema: Arc::new(DFSchema::empty()),
         }
+    }
+}
+
+impl PartialOrd for DescribeFiles {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        self.table.partial_cmp(&other.table)
     }
 }
 

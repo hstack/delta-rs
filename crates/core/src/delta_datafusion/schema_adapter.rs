@@ -1,10 +1,11 @@
 use std::fmt::Debug;
 use std::sync::Arc;
 
-use arrow_array::RecordBatch;
-use arrow_schema::{Schema, SchemaRef};
+use arrow_array::{new_null_array, RecordBatch, RecordBatchOptions};
+use arrow_cast::{can_cast_types, cast};
+use arrow_schema::{Field, Schema, SchemaRef};
 use datafusion::datasource::schema_adapter::{SchemaAdapter, SchemaAdapterFactory, SchemaMapper};
-
+use datafusion_common::plan_err;
 use crate::operations::cast::cast_record_batch;
 
 /// A Schema Adapter Factory which provides casting record batches from parquet to meet
@@ -13,21 +14,23 @@ use crate::operations::cast::cast_record_batch;
 pub(crate) struct DeltaSchemaAdapterFactory {}
 
 impl SchemaAdapterFactory for DeltaSchemaAdapterFactory {
-    fn create(&self, schema: SchemaRef) -> Box<dyn SchemaAdapter> {
+    fn create(&self, projected_table_schema: SchemaRef, table_schema: SchemaRef) -> Box<dyn SchemaAdapter> {
         Box::new(DeltaSchemaAdapter {
-            table_schema: schema,
+            projected_table_schema,
+            table_schema,
         })
     }
 }
 
 pub(crate) struct DeltaSchemaAdapter {
+    projected_table_schema: SchemaRef,
     /// Schema for the table
     table_schema: SchemaRef,
 }
 
 impl SchemaAdapter for DeltaSchemaAdapter {
     fn map_column_index(&self, index: usize, file_schema: &Schema) -> Option<usize> {
-        let field = self.table_schema.field(index);
+        let field = self.projected_table_schema.field(index);
         Some(file_schema.fields.find(field.name())?.0)
     }
 
@@ -45,6 +48,7 @@ impl SchemaAdapter for DeltaSchemaAdapter {
 
         Ok((
             Arc::new(SchemaMapping {
+                projected_table_schema: self.projected_table_schema.clone(),
                 table_schema: self.table_schema.clone(),
             }),
             projection,
@@ -54,12 +58,13 @@ impl SchemaAdapter for DeltaSchemaAdapter {
 
 #[derive(Debug)]
 pub(crate) struct SchemaMapping {
+    projected_table_schema: SchemaRef,
     table_schema: SchemaRef,
 }
 
 impl SchemaMapper for SchemaMapping {
     fn map_batch(&self, batch: RecordBatch) -> datafusion_common::Result<RecordBatch> {
-        let record_batch = cast_record_batch(&batch, self.table_schema.clone(), false, true)?;
+        let record_batch = cast_record_batch(&batch, self.projected_table_schema.clone(), false, true)?;
         Ok(record_batch)
     }
 

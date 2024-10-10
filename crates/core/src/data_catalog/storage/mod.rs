@@ -30,6 +30,7 @@ const DELTA_LOG_FOLDER: &str = "_delta_log";
 ///
 /// assuming it contains valid deltalake data, i.e a `_delta_log` folder:
 /// s3://host.example.com:3000/data/tpch/customer/_delta_log/
+#[derive(Debug)]
 pub struct ListingSchemaProvider {
     authority: String,
     /// Underlying object store
@@ -60,7 +61,12 @@ impl ListingSchemaProvider {
 
     /// Reload table information from ObjectStore
     pub async fn refresh(&self) -> datafusion_common::Result<()> {
-        let entries: Vec<_> = self.store.list(None).try_collect().await?;
+        let tmp1 = self.store.list(None);
+
+        let entries: Vec<ObjectMeta> = self.store.list(None)
+            .try_collect()
+            .await
+            .map_err(|e| DataFusionError::ObjectStore(e))?;
         let mut tables = HashSet::new();
         for file in entries.iter() {
             let mut parent = Path::new(file.location.as_ref());

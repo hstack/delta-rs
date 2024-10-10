@@ -22,6 +22,8 @@
 //! };
 //!
 //! let state = state.with_query_planner(Arc::new(merge_planner));
+
+use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -32,13 +34,19 @@ use datafusion::{
     physical_planner::{DefaultPhysicalPlanner, ExtensionPlanner},
 };
 use datafusion_expr::LogicalPlan;
-
+use serde::Serializer;
 use crate::delta_datafusion::DataFusionResult;
 
 /// Deltaplanner
 pub struct DeltaPlanner<T: ExtensionPlanner> {
     /// custom extension planner
     pub extension_planner: T,
+}
+
+impl<T: ExtensionPlanner> Debug for DeltaPlanner<T> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "DeltaPlanner")
+    }
 }
 
 #[async_trait]

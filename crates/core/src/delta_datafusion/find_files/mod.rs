@@ -44,7 +44,7 @@ lazy_static! {
 #[derive(Default)]
 struct FindFilesPlannerExtension {}
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 struct FindFilesPlanner {}
 
 #[async_trait]

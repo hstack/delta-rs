@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 
@@ -60,6 +61,12 @@ impl Hash for FindFilesNode {
     fn hash<H: Hasher>(&self, state: &mut H) {
         state.write(self.id.as_bytes());
         state.finish();
+    }
+}
+
+impl PartialOrd for FindFilesNode {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        None
     }
 }
 

@@ -26,34 +26,34 @@ debug = true
 debug = "line-tables-only"
 
 [workspace.dependencies]
-delta_kernel = { version = "=0.3.0" }
+delta_kernel = { version = "0.3.1" }
 # delta_kernel = { path = "../delta-kernel-rs/kernel", version = "0.3.0" }
 
 # arrow
-arrow = { version = "52" }
-arrow-arith = { version = "52" }
-arrow-array = { version = "52", features = ["chrono-tz"] }
-arrow-buffer = { version = "52" }
-arrow-cast = { version = "52" }
-arrow-ipc = { version = "52" }
-arrow-json = { version = "52" }
-arrow-ord = { version = "52" }
-arrow-row = { version = "52" }
-arrow-schema = { version = "52" }
-arrow-select = { version = "52" }
-object_store = { version = "0.10.1" }
-parquet = { version = "52" }
+arrow = { version = "53" }
+arrow-arith = { version = "53" }
+arrow-array = { version = "53", features = ["chrono-tz"] }
+arrow-buffer = { version = "53" }
+arrow-cast = { version = "53" }
+arrow-ipc = { version = "53" }
+arrow-json = { version = "53" }
+arrow-ord = { version = "53" }
+arrow-row = { version = "53" }
+arrow-schema = { version = "53" }
+arrow-select = { version = "53" }
+object_store = { version = "0.11.0" }
+parquet = { version = "53" }
 
 # datafusion
-datafusion = { version = "41" }
-datafusion-expr = { version = "41" }
-datafusion-common = { version = "41" }
-datafusion-proto = { version = "41" }
-datafusion-sql = { version = "41" }
-datafusion-physical-expr = { version = "41" }
-datafusion-physical-plan = { version = "41" }
-datafusion-functions = { version = "41" }
-datafusion-functions-aggregate = { version = "41" }
+datafusion = { version = "42" }
+datafusion-expr = { version = "42" }
+datafusion-common = { version = "42" }
+datafusion-proto = { version = "42" }
+datafusion-sql = { version = "42" }
+datafusion-physical-expr = { version = "42" }
+datafusion-physical-plan = { version = "42" }
+datafusion-functions = { version = "42" }
+datafusion-functions-aggregate = { version = "42" }
 
 # serde
 serde = { version = "1.0.194", features = ["derive"] }
@@ -91,10 +91,30 @@ datafusion-functions-window = { git = 'https://github.com/hstack/arrow-datafusio
 datafusion-optimizer = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
 datafusion-physical-expr = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
 datafusion-physical-expr-common = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
-datafusion-physical-expr-functions-aggregate = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
 datafusion-physical-optimizer = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
 datafusion-physical-plan = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
 datafusion-proto = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
 datafusion-proto-common = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
 datafusion-sql = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
 datafusion-substrait = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
+# datafusion = {path = "../arrow-datafusion-42/datafusion/core" }
+# datafusion-catalog = {path = "../arrow-datafusion-42/datafusion/catalog" }
+# datafusion-common = {path = "../arrow-datafusion-42/datafusion/common" }
+# datafusion-common-runtime = {path = "../arrow-datafusion-42/datafusion/common-runtime" }
+# datafusion-execution = {path = "../arrow-datafusion-42/datafusion/execution" }
+# datafusion-expr = {path = "../arrow-datafusion-42/datafusion/expr" }
+# datafusion-expr-common = {path = "../arrow-datafusion-42/datafusion/expr-common" }
+# datafusion-functions = {path = "../arrow-datafusion-42/datafusion/functions" }
+# datafusion-functions-aggregate = {path = "../arrow-datafusion-42/datafusion/functions-aggregate" }
+# datafusion-functions-aggregate-common = {path = "../arrow-datafusion-42/datafusion/functions-aggregate-common" }
+# datafusion-functions-nested = {path = "../arrow-datafusion-42/datafusion/functions-nested" }
+# datafusion-functions-window = {path = "../arrow-datafusion-42/datafusion/functions-window" }
+# datafusion-optimizer = {path = "../arrow-datafusion-42/datafusion/optimizer" }
+# datafusion-physical-expr = {path = "../arrow-datafusion-42/datafusion/physical-expr" }
+# datafusion-physical-expr-common = {path = "../arrow-datafusion-42/datafusion/physical-expr-common" }
+# datafusion-physical-optimizer = {path = "../arrow-datafusion-42/datafusion/physical-optimizer" }
+# datafusion-physical-plan = {path = "../arrow-datafusion-42/datafusion/physical-plan" }
+# datafusion-proto = {path = "../arrow-datafusion-42/datafusion/proto" }
+# datafusion-proto-common = {path = "../arrow-datafusion-42/datafusion/proto-common" }
+# datafusion-sql = {path = "../arrow-datafusion-42/datafusion/sql" }
+# datafusion-substrait = {path = "../arrow-datafusion-42/datafusion/substrait" }
