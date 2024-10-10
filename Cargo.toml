@@ -77,25 +77,46 @@ tokio = { version = "1" }
 num_cpus = { version = "1" }
 
 [patch.crates-io]
-datafusion = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
-datafusion-catalog = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
-datafusion-common = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
-datafusion-common-runtime = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
-datafusion-execution = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
-datafusion-expr = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
-datafusion-expr-common = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
-datafusion-functions = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
-datafusion-functions-aggregate = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
-datafusion-functions-aggregate-common = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
-datafusion-functions-nested = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
-datafusion-functions-window = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
-datafusion-optimizer = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
-datafusion-physical-expr = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
-datafusion-physical-expr-common = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
-datafusion-physical-expr-functions-aggregate = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
-datafusion-physical-optimizer = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
-datafusion-physical-plan = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
-datafusion-proto = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
-datafusion-proto-common = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
-datafusion-sql = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
-datafusion-substrait = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
+datafusion = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main-43' }
+datafusion-catalog = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main-43' }
+datafusion-common = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main-43' }
+datafusion-common-runtime = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main-43' }
+datafusion-execution = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main-43' }
+datafusion-expr = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main-43' }
+datafusion-expr-common = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main-43' }
+datafusion-functions = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main-43' }
+datafusion-functions-aggregate = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main-43' }
+datafusion-functions-aggregate-common = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main-43' }
+datafusion-functions-nested = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main-43' }
+datafusion-functions-window = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main-43' }
+datafusion-optimizer = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main-43' }
+datafusion-physical-expr = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main-43' }
+datafusion-physical-expr-common = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main-43' }
+datafusion-physical-optimizer = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main-43' }
+datafusion-physical-plan = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main-43' }
+datafusion-proto = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main-43' }
+datafusion-proto-common = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main-43' }
+datafusion-sql = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main-43' }
+datafusion-substrait = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main-43' }
+datafusion-python = { git = 'https://github.com/hstack/datafusion-python.git', branch = 'main-43' }
+# datafusion = {path = "../arrow-datafusion-42/datafusion/core" }
+# datafusion-catalog = {path = "../arrow-datafusion-42/datafusion/catalog" }
+# datafusion-common = {path = "../arrow-datafusion-42/datafusion/common" }
+# datafusion-common-runtime = {path = "../arrow-datafusion-42/datafusion/common-runtime" }
+# datafusion-execution = {path = "../arrow-datafusion-42/datafusion/execution" }
+# datafusion-expr = {path = "../arrow-datafusion-42/datafusion/expr" }
+# datafusion-expr-common = {path = "../arrow-datafusion-42/datafusion/expr-common" }
+# datafusion-functions = {path = "../arrow-datafusion-42/datafusion/functions" }
+# datafusion-functions-aggregate = {path = "../arrow-datafusion-42/datafusion/functions-aggregate" }
+# datafusion-functions-aggregate-common = {path = "../arrow-datafusion-42/datafusion/functions-aggregate-common" }
+# datafusion-functions-nested = {path = "../arrow-datafusion-42/datafusion/functions-nested" }
+# datafusion-functions-window = {path = "../arrow-datafusion-42/datafusion/functions-window" }
+# datafusion-optimizer = {path = "../arrow-datafusion-42/datafusion/optimizer" }
+# datafusion-physical-expr = {path = "../arrow-datafusion-42/datafusion/physical-expr" }
+# datafusion-physical-expr-common = {path = "../arrow-datafusion-42/datafusion/physical-expr-common" }
+# datafusion-physical-optimizer = {path = "../arrow-datafusion-42/datafusion/physical-optimizer" }
+# datafusion-physical-plan = {path = "../arrow-datafusion-42/datafusion/physical-plan" }
+# datafusion-proto = {path = "../arrow-datafusion-42/datafusion/proto" }
+# datafusion-proto-common = {path = "../arrow-datafusion-42/datafusion/proto-common" }
+# datafusion-sql = {path = "../arrow-datafusion-42/datafusion/sql" }
+# datafusion-substrait = {path = "../arrow-datafusion-42/datafusion/substrait" }
