@@ -41,7 +41,7 @@ arrow-ord = { version = "53" }
 arrow-row = { version = "53" }
 arrow-schema = { version = "53" }
 arrow-select = { version = "53" }
-object_store = { version = "0.11.0" }
+object_store = { version = "0.11.1" }
 parquet = { version = "53" }
 
 # datafusion
@@ -97,7 +97,6 @@ datafusion-proto = { git = 'https://github.com/hstack/arrow-datafusion.git', bra
 datafusion-proto-common = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
 datafusion-sql = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
 datafusion-substrait = { git = 'https://github.com/hstack/arrow-datafusion.git', branch = 'main' }
-object_store = { git = 'https://github.com/apache/arrow-rs.git', tag = '53.1.0' }
 # datafusion = {path = "../arrow-datafusion-42/datafusion/core" }
 # datafusion-catalog = {path = "../arrow-datafusion-42/datafusion/catalog" }
 # datafusion-common = {path = "../arrow-datafusion-42/datafusion/common" }
