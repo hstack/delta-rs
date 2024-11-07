@@ -269,7 +269,7 @@ pub trait LogStore: Sync + Send {
 }
 
 #[cfg(feature = "datafusion")]
-fn object_store_url(location: &Url) -> ObjectStoreUrl {
+pub fn object_store_url(location: &Url) -> ObjectStoreUrl {
     use object_store::path::DELIMITER;
     ObjectStoreUrl::parse(format!(
         "delta-rs://{}-{}{}",
