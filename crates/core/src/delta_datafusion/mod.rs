@@ -1111,6 +1111,7 @@ fn partitioned_file_from_action(
         range: None,
         extensions: None,
         statistics: None,
+        metadata_size_hint: None,
     }
 }
 
@@ -2014,6 +2015,7 @@ mod tests {
             range: None,
             extensions: None,
             statistics: None,
+            metadata_size_hint: None,
         };
         assert_eq!(file.partition_values, ref_file.partition_values)
     }
