@@ -43,6 +43,8 @@ use datafusion::datasource::physical_plan::parquet::ParquetExecBuilder;
 use datafusion::datasource::physical_plan::{
     wrap_partition_type_in_dict, wrap_partition_value_in_dict, FileScanConfig, ParquetExec,
 };
+
+use datafusion::datasource::schema_adapter::DefaultSchemaAdapterFactory;
 use datafusion::datasource::{listing::PartitionedFile, MemTable, TableProvider, TableType};
 use datafusion::execution::context::{SessionConfig, SessionContext, SessionState, TaskContext};
 use datafusion::execution::runtime_env::RuntimeEnv;
@@ -70,7 +72,7 @@ use datafusion_sql::planner::ParserOptions;
 use either::Either;
 use futures::TryStreamExt;
 use itertools::Itertools;
-use object_store::ObjectMeta;
+use object_store::{Error, ObjectMeta};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
@@ -1121,6 +1123,7 @@ fn partitioned_file_from_action(
         range: None,
         extensions: None,
         statistics: None,
+        metadata_size_hint: None,
     }
 }
 
@@ -2024,6 +2027,7 @@ mod tests {
             range: None,
             extensions: None,
             statistics: None,
+            metadata_size_hint: None,
         };
         assert_eq!(file.partition_values, ref_file.partition_values)
     }

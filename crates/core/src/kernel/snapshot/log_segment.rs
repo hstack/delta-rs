@@ -360,6 +360,7 @@ impl LogSegment {
         config: &DeltaTableConfig,
     ) -> DeltaResult<impl Iterator<Item = Result<RecordBatch, DeltaTableError>> + '_> {
         let log_path = table_root.child("_delta_log");
+        let tmp = Arc::new(read_schema.clone());
         let mut decoder = json::get_decoder(Arc::new(read_schema.try_into()?), config)?;
 
         let mut commit_data = Vec::new();
