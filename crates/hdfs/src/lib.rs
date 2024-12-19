@@ -4,7 +4,7 @@ use deltalake_core::logstore::{default_logstore, logstores, LogStore, LogStoreFa
 use deltalake_core::storage::{
     factories, url_prefix_handler, ObjectStoreFactory, ObjectStoreRef, StorageOptions,
 };
-use deltalake_core::{DeltaResult, DeltaTableError, Path};
+use deltalake_core::{DeltaResult, Path};
 use hdfs_native_object_store::HdfsObjectStore;
 use url::Url;
 
@@ -20,7 +20,7 @@ impl ObjectStoreFactory for HdfsFactory {
         let store: ObjectStoreRef = Arc::new(HdfsObjectStore::with_config(
             url.as_str(),
             options.0.clone(),
-        ).map_err(|e| DeltaTableError::ObjectStore { source: e})?);
+        )?);
         let prefix = Path::parse(url.path())?;
         Ok((url_prefix_handler(store, prefix.clone()), prefix))
     }

@@ -22,7 +22,6 @@
 //! };
 //!
 //! let state = state.with_query_planner(Arc::new(merge_planner));
-use std::fmt::Debug;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -33,6 +32,7 @@ use datafusion::{
     physical_planner::{DefaultPhysicalPlanner, ExtensionPlanner},
 };
 use datafusion_expr::LogicalPlan;
+
 use crate::delta_datafusion::DataFusionResult;
 
 /// Deltaplanner
