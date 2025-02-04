@@ -241,6 +241,7 @@ impl DeltaTableBuilder {
             storage_options
                 .clone()
                 .into_iter()
+                .map(|(k, v)| (k.strip_prefix("deltalake.").map(ToString::to_string).unwrap_or(k), v))
                 .map(|(k, v)| {
                     let needs_trim = v.starts_with("http://")
                         || v.starts_with("https://")
