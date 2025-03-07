@@ -56,7 +56,9 @@ use datafusion_common::{
 };
 use datafusion_expr::logical_plan::CreateExternalTable;
 use datafusion_expr::utils::conjunction;
-use datafusion_expr::{col, Expr, Extension, LogicalPlan, TableProviderFilterPushDown, Volatility};
+use datafusion_expr::{
+    col, BinaryExpr, Expr, Extension, LogicalPlan, TableProviderFilterPushDown, Volatility,
+};
 use datafusion_physical_plan::filter::FilterExec;
 use datafusion_physical_plan::limit::LocalLimitExec;
 use datafusion_physical_plan::metrics::{ExecutionPlanMetricsSet, MetricBuilder, MetricsSet};
@@ -544,6 +546,10 @@ impl<'a> DeltaScanBuilder<'a> {
             Some(schema.clone()),
         )?;
 
+        // TODO temporarily using full schema to generate pruning predicates
+        //  should we optimize this by only including fields referenced from predicates?
+        let filter_df_schema = logical_schema.clone().to_dfschema()?;
+
         let logical_schema = if let Some(used_columns) = self.projection {
             let mut fields = vec![];
             for idx in used_columns {
@@ -555,10 +561,9 @@ impl<'a> DeltaScanBuilder<'a> {
         };
 
         let context = SessionContext::new();
-        let df_schema = logical_schema.clone().to_dfschema()?;
         let logical_filter = self
             .filter
-            .map(|expr| context.create_physical_expr(expr, &df_schema).unwrap());
+            .map(|expr| context.create_physical_expr(expr, &filter_df_schema).unwrap());
 
         // Perform Pruning of files to scan
         let (files, files_scanned, files_pruned) = match self.files {
@@ -785,15 +790,45 @@ impl TableProvider for DeltaTable {
         &self,
         filter: &[&Expr],
     ) -> DataFusionResult<Vec<TableProviderFilterPushDown>> {
-        Ok(filter
-            .iter()
-            .map(|_| TableProviderFilterPushDown::Inexact)
-            .collect())
+        let partition_cols = self.snapshot()?.metadata().partition_columns.clone();
+        Ok(get_pushdown_filters(filter, partition_cols))
     }
 
     fn statistics(&self) -> Option<Statistics> {
         self.snapshot().ok()?.datafusion_table_statistics()
     }
+}
+
+fn get_pushdown_filters(
+    filter: &[&Expr],
+    partition_cols: Vec<String>,
+) -> Vec<TableProviderFilterPushDown> {
+    filter
+        .iter()
+        .map(|filter| {
+            let columns = extract_columns(filter);
+            if !columns.is_empty() && columns.iter().all(|col| partition_cols.contains(col)) {
+                TableProviderFilterPushDown::Exact
+            } else {
+                TableProviderFilterPushDown::Inexact
+            }
+        })
+        .collect()
+}
+
+fn extract_columns(expr: &Expr) -> Vec<String> {
+    let mut columns = Vec::new();
+    match expr {
+        Expr::Column(col) => columns.push(col.name.clone()),
+        Expr::BinaryExpr(BinaryExpr { left, right, .. }) => {
+            let left_columns = extract_columns(left);
+            let right_columns = extract_columns(right);
+            columns.extend(left_columns);
+            columns.extend(right_columns);
+        }
+        _ => {}
+    }
+    columns
 }
 
 /// A Delta table provider that enables additional metadata columns to be included during the scan
@@ -901,10 +936,8 @@ impl TableProvider for DeltaTableProvider {
         &self,
         filter: &[&Expr],
     ) -> DataFusionResult<Vec<TableProviderFilterPushDown>> {
-        Ok(filter
-            .iter()
-            .map(|_| TableProviderFilterPushDown::Inexact)
-            .collect())
+        let partition_cols = self.snapshot.metadata().partition_columns.clone();
+        Ok(get_pushdown_filters(filter, partition_cols))
     }
 
     fn statistics(&self) -> Option<Statistics> {
