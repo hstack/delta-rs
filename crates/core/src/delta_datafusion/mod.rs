@@ -1652,9 +1652,37 @@ impl PhysicalExtensionCodec for DeltaPhysicalCodec {
     ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
         let wire: DeltaScanWire = serde_json::from_reader(buf)
             .map_err(|_| DataFusionError::Internal("Unable to decode DeltaScan".to_string()))?;
+
+        let mut parquet_scan = (*inputs)[0].clone();
+        if let Some(ds_exec) = parquet_scan.as_any().downcast_ref::<DataSourceExec>() {
+            if let Some(file_conf) = ds_exec
+                .data_source()
+                .as_any()
+                .downcast_ref::<FileScanConfig>()
+            {
+                if let Some(pq_source) = file_conf
+                    .file_source()
+                    .as_any()
+                    .downcast_ref::<ParquetSource>()
+                {
+                    let with_adapter_factory = pq_source
+                        .clone()
+                        .with_schema_adapter_factory(Arc::new(DeltaSchemaAdapterFactory {}));
+                    let config_with_source = file_conf
+                        .clone()
+                        .with_source(Arc::new(with_adapter_factory));
+                    parquet_scan = Arc::new(
+                        ds_exec
+                            .clone()
+                            .with_data_source(Arc::new(config_with_source)),
+                    );
+                }
+            }
+        }
+
         let delta_scan = DeltaScan {
             table_uri: wire.table_uri,
-            parquet_scan: (*inputs)[0].clone(),
+            parquet_scan,
             config: wire.config,
             logical_schema: wire.logical_schema,
             metrics: ExecutionPlanMetricsSet::new(),
