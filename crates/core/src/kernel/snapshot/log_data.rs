@@ -893,12 +893,36 @@ mod datafusion {
 
         // This function is required since DataFusion 35.0, but is implemented as a no-op
         // https://github.com/apache/arrow-datafusion/blob/ec6abece2dcfa68007b87c69eefa6b0d7333f628/datafusion/core/src/datasource/physical_plan/parquet/page_filter.rs#L550
-        fn contained(
-            &self,
-            _column: &Column,
-            _value: &HashSet<ScalarValue>,
-        ) -> Option<BooleanArray> {
-            None
+        fn contained(&self, column: &Column, value: &HashSet<ScalarValue>) -> Option<BooleanArray> {
+            // Check if the column is a partition column
+            if !self.metadata.partition_columns.contains(&column.name) {
+                return None;
+            }
+
+            // Retrieve the partition values for the column
+            let partition_values = self.pick_stats(column, "__dummy__")?;
+
+            let partition_values = partition_values
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .ok_or(DeltaTableError::generic(
+                    "failed to downcast string result to StringArray.",
+                ))
+                .ok()?;
+
+            let mut contains = Vec::with_capacity(partition_values.len());
+
+            for i in 0..partition_values.len() {
+                if partition_values.is_null(i) {
+                    contains.push(false);
+                } else {
+                    let partition_value =
+                        ScalarValue::Utf8(Some(partition_values.value(i).to_string()));
+                    contains.push(value.contains(&partition_value));
+                }
+            }
+
+            Some(BooleanArray::from(contains))
         }
     }
 }
