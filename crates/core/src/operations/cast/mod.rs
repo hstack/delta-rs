@@ -44,6 +44,32 @@ fn cast_struct(
     )
 }
 
+fn make_empty_struct_with_row_count(
+    fields: &Fields,
+    cast_options: &CastOptions,
+    add_missing: bool,
+    row_count: usize,
+) -> Result<StructArray, ArrowError> {
+    StructArray::try_new_with_length(
+        fields.to_owned(),
+        fields
+            .iter()
+            .map(|field| {
+                if add_missing && field.is_nullable() {
+                    Ok(new_null_array(field.data_type(), row_count))
+                } else {
+                    Err(ArrowError::SchemaError(format!(
+                        "Could not find column {}",
+                        field.name()
+                    )))
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        None,
+        row_count,
+    )
+}
+
 fn cast_list<T: OffsetSizeTrait>(
     array: &GenericListArray<T>,
     field: &FieldRef,
@@ -178,13 +204,22 @@ pub fn cast_record_batch(
         ..Default::default()
     };
 
-    let s = StructArray::new(
-        batch.schema().as_ref().to_owned().fields,
-        batch.columns().to_owned(),
-        None,
-    );
-    let struct_array = cast_struct(&s, target_schema.fields(), &cast_options, add_missing)?;
-
+    let struct_array =
+        if batch.num_rows() > 0 && batch.columns().len() == 0 && batch.schema().fields.len() == 0 {
+            make_empty_struct_with_row_count(
+                target_schema.fields(),
+                &cast_options,
+                add_missing,
+                batch.num_rows(),
+            )?
+        } else {
+            let s = StructArray::new(
+                batch.schema().as_ref().to_owned().fields,
+                batch.columns().to_owned(),
+                None,
+            );
+            cast_struct(&s, target_schema.fields(), &cast_options, add_missing)?
+        };
     Ok(RecordBatch::try_new_with_options(
         target_schema,
         struct_array.columns().to_vec(),
