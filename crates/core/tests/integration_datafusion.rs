@@ -41,11 +41,14 @@ use url::Url;
 mod local {
     use super::*;
     use datafusion::datasource::source::DataSourceExec;
+    use datafusion::prelude::SessionConfig;
     use datafusion::{common::stats::Precision, datasource::provider_as_source};
+    use datafusion_common::assert_contains;
     use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
     use datafusion_expr::{
         LogicalPlan, LogicalPlanBuilder, TableProviderFilterPushDown, TableScan,
     };
+    use datafusion_physical_plan::displayable;
     use deltalake_core::{
         delta_datafusion::DeltaLogicalCodec, logstore::default_logstore, writer::JsonWriter,
     };
@@ -213,6 +216,36 @@ mod local {
     }
 
     #[tokio::test]
+    async fn test_datafusion_optimize_stats_partitioned_pushdown() -> Result<()> {
+        let config = SessionConfig::new().with_target_partitions(2);
+        let ctx = SessionContext::new_with_config(config);
+        let table = open_table("../test/tests/data/http_requests").await?;
+        ctx.register_table("http_requests", Arc::new(table.clone()))?;
+
+        let sql = "SELECT COUNT(*) as num_events FROM http_requests WHERE date > '2023-04-13'";
+        let df = ctx.sql(sql).await?;
+        let plan = df.clone().create_physical_plan().await?;
+
+        // convert to explain plan form
+        let display = displayable(plan.as_ref()).indent(true).to_string();
+
+        assert_contains!(
+            &display,
+            "ProjectionExec: expr=[1437 as num_events]\n  PlaceholderRowExec"
+        );
+
+        let batches = df.collect().await?;
+        let batch = &batches[0];
+
+        assert_eq!(
+            batch.column(0).as_ref(),
+            Arc::new(Int64Array::from(vec![1437])).as_ref(),
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_datafusion_query_partitioned_pushdown() -> Result<()> {
         let ctx = SessionContext::new();
         let table = open_table("../test/tests/data/delta-0.8.0-partitioned").await?;
@@ -290,8 +323,7 @@ mod local {
         use datafusion::prelude::*;
         let ctx = SessionContext::new();
         let state = ctx.state();
-        let table = open_table("../test/tests/data/delta-0.8.0")
-            .await?;
+        let table = open_table("../test/tests/data/delta-0.8.0").await?;
 
         // Simple Equality test, we only exercise the limit in this test
         let e = col("value").eq(lit(2));

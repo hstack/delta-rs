@@ -27,7 +27,9 @@ use std::fmt::{self, Debug};
 use std::sync::Arc;
 
 use arrow_array::types::UInt16Type;
-use arrow_array::{Array, DictionaryArray, RecordBatch, StringArray, TypedDictionaryArray};
+use arrow_array::{
+    Array, BooleanArray, DictionaryArray, RecordBatch, StringArray, TypedDictionaryArray,
+};
 use arrow_cast::display::array_value_to_string;
 use arrow_cast::{cast_with_options, CastOptions};
 use arrow_schema::{
@@ -35,6 +37,7 @@ use arrow_schema::{
     SchemaRef as ArrowSchemaRef, TimeUnit,
 };
 use arrow_select::concat::concat_batches;
+use arrow_select::filter::filter_record_batch;
 use async_trait::async_trait;
 use chrono::{DateTime, TimeZone, Utc};
 use datafusion::catalog::{Session, TableProviderFactory};
@@ -88,7 +91,9 @@ use url::Url;
 use crate::delta_datafusion::expr::parse_predicate_expression;
 use crate::delta_datafusion::schema_adapter::DeltaSchemaAdapterFactory;
 use crate::errors::{DeltaResult, DeltaTableError};
-use crate::kernel::{Add, DataCheck, EagerSnapshot, Invariant, Snapshot, StructTypeExt};
+use crate::kernel::{
+    Add, DataCheck, EagerSnapshot, Invariant, LogDataHandler, Snapshot, StructTypeExt,
+};
 use crate::logstore::{logstore_for, object_store_url, LogStoreRef};
 use crate::table::builder::ensure_table_uri;
 use crate::table::state::DeltaTableState;
@@ -594,6 +599,8 @@ impl<'a> DeltaScanBuilder<'a> {
                 .unwrap()
         });
 
+        let mut pruning_mask: Option<_> = None;
+
         // Perform Pruning of files to scan
         let (files, files_scanned, files_pruned) = match self.files {
             Some(files) => {
@@ -613,7 +620,9 @@ impl<'a> DeltaScanBuilder<'a> {
                     let files_to_prune = if let Some(predicate) = &logical_filter {
                         let pruning_predicate =
                             PruningPredicate::try_new(predicate.clone(), logical_schema.clone())?;
-                        pruning_predicate.prune(self.snapshot)?
+                        let mask = pruning_predicate.prune(self.snapshot)?;
+                        pruning_mask = Some(mask.clone());
+                        mask
                     } else {
                         vec![true; num_containers]
                     };
@@ -716,10 +725,18 @@ impl<'a> DeltaScanBuilder<'a> {
             ));
         }
 
-        let stats = self
-            .snapshot
-            .datafusion_table_statistics()
-            .unwrap_or(Statistics::new_unknown(&schema));
+        // FIXME - where is the correct place to marry file pruning with statistics pruning?
+        //  Temporarily re-generating the log handler, just so that we can compute the stats.
+        //  Should we update datafusion_table_statistics to optionally take the mask?
+        let stats = if let Some(mask) = pruning_mask {
+            let es = self.snapshot.snapshot();
+            let pruned_stats = prune_file_statistics(&es.files, mask);
+            LogDataHandler::new(&pruned_stats, es.metadata(), es.schema()).statistics()
+        } else {
+            self.snapshot.datafusion_table_statistics()
+        };
+
+        let stats = stats.unwrap_or(Statistics::new_unknown(&schema));
 
         let parquet_options = TableParquetOptions {
             global: self.session.config().options().execution.parquet.clone(),
@@ -776,6 +793,27 @@ impl<'a> DeltaScanBuilder<'a> {
             metrics,
         })
     }
+}
+
+fn prune_file_statistics(
+    record_batches: &Vec<RecordBatch>,
+    pruning_mask: Vec<bool>,
+) -> Vec<RecordBatch> {
+    let mut filtered_batches = Vec::new();
+    let mut mask_offset = 0;
+
+    for batch in record_batches {
+        let num_rows = batch.num_rows();
+        let batch_mask = &pruning_mask[mask_offset..mask_offset + num_rows];
+        mask_offset += num_rows;
+
+        let boolean_mask = BooleanArray::from(batch_mask.to_vec());
+        let filtered_batch =
+            filter_record_batch(batch, &boolean_mask).expect("Failed to filter RecordBatch");
+        filtered_batches.push(filtered_batch);
+    }
+
+    filtered_batches
 }
 
 // TODO: implement this for Snapshot, not for DeltaTable
