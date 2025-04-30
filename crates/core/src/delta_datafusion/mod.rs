@@ -848,8 +848,9 @@ impl TableProvider for DeltaTable {
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
         register_store(self.log_store(), session.runtime_env().clone());
         let filter_expr = conjunction(filters.iter().cloned());
-        let mut config = DeltaScanConfig::default();
-        config.options = self.config.options.clone();
+        let config = DeltaScanConfigBuilder::default()
+            .with_options(self.config.options.clone())
+            .build(self.snapshot()?)?;
 
         let scan = DeltaScanBuilder::new(self.snapshot()?, self.log_store(), session)
             .with_projection(projection)
@@ -872,8 +873,9 @@ impl TableProvider for DeltaTable {
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
         register_store(self.log_store(), session.runtime_env().clone());
         let filter_expr = conjunction(filters.iter().cloned());
-        let mut config = DeltaScanConfig::default();
-        config.options = self.config.options.clone();
+        let config = DeltaScanConfigBuilder::default()
+            .with_options(self.config.options.clone())
+            .build(self.snapshot()?)?;
 
         let scan = DeltaScanBuilder::new(self.snapshot()?, self.log_store(), session)
             .with_projection(projection)
