@@ -558,7 +558,8 @@ mod datafusion {
     use arrow::compute::concat_batches;
     use arrow_arith::aggregate::sum;
     use arrow_array::{ArrayRef, BooleanArray, Int64Array, UInt64Array};
-    use arrow_schema::DataType as ArrowDataType;
+    use arrow_cast::pretty::print_batches;
+    use arrow_schema::{DataType as ArrowDataType, Schema, SchemaRef};
     use datafusion_common::scalar::ScalarValue;
     use datafusion_common::stats::{ColumnStatistics, Precision, Statistics};
     use datafusion_common::Column;
@@ -566,10 +567,11 @@ mod datafusion {
     use delta_kernel::expressions::Expression;
     use delta_kernel::schema::{DataType, PrimitiveType};
     use delta_kernel::{ExpressionEvaluator, ExpressionHandler};
-
+    use crate::kernel::arrow::delta_log_schema_for_table;
     use super::*;
     use crate::kernel::arrow::extract::{extract_and_cast_opt, extract_column};
     use crate::kernel::ARROW_HANDLER;
+    use crate::operations::cast::cast_record_batch;
 
     #[derive(Debug, Default, Clone)]
     enum AccumulatorType {
@@ -784,6 +786,20 @@ mod datafusion {
             })
         }
 
+        // Not all stats batches have the same schema, arrow evaluator will error in this case
+        fn add_field_schema(&self) -> SchemaRef {
+            let log_schema = delta_log_schema_for_table(
+                self.schema.try_into().unwrap(),
+                self.metadata.partition_columns.as_slice(),
+                false,
+                true, true,
+            );
+            let add_field = log_schema.field_with_name("add").unwrap().clone();
+            Arc::new(Schema::new(
+                vec![add_field]
+            ))
+        }
+
         fn pick_stats(&self, column: &Column, stats_field: &'static str) -> Option<ArrayRef> {
             let field = self.schema.field(&column.name)?;
             // See issue #1214. Binary type does not support natural order which is required for Datafusion to prune
@@ -795,14 +811,19 @@ mod datafusion {
             } else {
                 Expression::column(["add", "stats_parsed", stats_field, &column.name])
             };
+            let log_schema = self.add_field_schema();
             let evaluator = ARROW_HANDLER.get_evaluator(
-                crate::kernel::models::fields::log_schema_ref().clone(),
+                // Actually not used in the evaluator
+                Arc::new(log_schema.clone().try_into().ok()?),
                 expression,
                 field.data_type().clone(),
             );
             let mut results = Vec::with_capacity(self.data.len());
             for batch in self.data.iter() {
-                let engine = ArrowEngineData::new(batch.clone());
+                let engine = ArrowEngineData::new(
+                    // FIXME the casting should probably happen in the delta-kernel evaluate
+                    cast_record_batch(batch, log_schema.clone(), false, true).ok()?,
+                );
                 let result = evaluator.evaluate(&engine).ok()?;
                 let result = result
                     .any_ref()
