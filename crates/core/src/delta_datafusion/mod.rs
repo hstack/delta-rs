@@ -61,7 +61,7 @@ use datafusion_common::{
 use datafusion_expr::execution_props::ExecutionProps;
 use datafusion_expr::logical_plan::CreateExternalTable;
 use datafusion_expr::simplify::SimplifyContext;
-use datafusion_expr::utils::conjunction;
+use datafusion_expr::utils::{conjunction, split_conjunction};
 use datafusion_expr::{
     col, BinaryExpr, Expr, Extension, LogicalPlan, Operator, TableProviderFilterPushDown,
     Volatility,
@@ -586,18 +586,25 @@ impl<'a> DeltaScanBuilder<'a> {
         let context = SessionContext::new();
         let df_schema = logical_schema.clone().to_dfschema()?;
 
-        let logical_filter = self.filter.map(|expr| {
-            // Simplify the expression first
-            let props = ExecutionProps::new();
-            let simplify_context =
-                SimplifyContext::new(&props).with_schema(df_schema.clone().into());
-            let simplifier = ExprSimplifier::new(simplify_context).with_max_cycles(10);
-            let simplified = simplifier.simplify(expr).unwrap();
+        let logical_filter = self.filter.clone()
+            .map(|expr| simplify_predicate(&context, &df_schema, expr));
+        let pushdown_filter = self.filter.and_then(|expr| {
+            let predicates = split_conjunction(&expr);
+            let pushdown_filters =
+                get_pushdown_filters(&predicates, self.snapshot.metadata().partition_columns.clone());
 
-            context
-                .create_physical_expr(simplified, &df_schema)
-                .unwrap()
-        });
+            let filtered_predicates = predicates
+                .into_iter()
+                .zip(pushdown_filters.into_iter())
+                .filter_map(|(filter, pushdown)| {
+                    if pushdown == TableProviderFilterPushDown::Inexact {
+                        Some(filter.clone())
+                    } else {
+                        None
+                    }
+                });
+            conjunction(filtered_predicates)
+        }).map(|expr| simplify_predicate(&context, &df_schema, expr));
 
         let mut pruning_mask: Option<_> = None;
 
@@ -749,7 +756,7 @@ impl<'a> DeltaScanBuilder<'a> {
         // Sometimes (i.e Merge) we want to prune files that don't make the
         // filter and read the entire contents for files that do match the
         // filter
-        if let Some(predicate) = logical_filter {
+        if let Some(predicate) = pushdown_filter {
             if config.enable_parquet_pushdown {
                 file_source = file_source.with_predicate(Arc::clone(&file_schema), predicate);
             }
@@ -793,6 +800,20 @@ impl<'a> DeltaScanBuilder<'a> {
             metrics,
         })
     }
+
+}
+
+fn simplify_predicate(context: &SessionContext, df_schema: &DFSchema, expr: Expr) -> Arc<dyn PhysicalExpr> {
+    // Simplify the expression first
+    let props = ExecutionProps::new();
+    let simplify_context =
+        SimplifyContext::new(&props).with_schema(df_schema.clone().into());
+    let simplifier = ExprSimplifier::new(simplify_context).with_max_cycles(10);
+    let simplified = simplifier.simplify(expr).unwrap();
+
+    context
+        .create_physical_expr(simplified, &df_schema)
+        .unwrap()
 }
 
 fn prune_file_statistics(
