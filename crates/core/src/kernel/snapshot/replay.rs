@@ -30,6 +30,7 @@ use crate::kernel::arrow::extract::{self as ex, ProvidesColumnByName};
 use crate::kernel::arrow::json;
 use crate::kernel::StructType;
 use crate::{DeltaResult, DeltaTableConfig, DeltaTableError};
+use crate::operations::cast::cast_record_batch;
 
 pin_project! {
     pub struct ReplayStream<'a, S> {
@@ -118,10 +119,73 @@ fn map_batch(
             ex::extract_and_cast_opt::<StructArray>(&batch, "add.partitionValues_parsed");
         if partitions_parsed_col.is_none() {
             new_batch = parse_partitions(new_batch, partitions_schema.as_ref())?;
+        } else {
+            new_batch = downcast_timestamp_columns(
+                new_batch,
+                partitions_schema.as_ref(),
+            )?;
         }
     }
 
     Ok(new_batch)
+}
+
+/// Temporary workaround for bug delta-rs-XXXX that occurs on delta-kernel-rs <= 0.9.0 and
+/// arrow-rs <= 54 - parquet reader will ignore type hints and return Timestamps using Nanos unit.
+/// This has the side effect of breaking partition pruning for Timestamp partition columns, as
+/// the record batches returned from the checkpoint will have the incorrect column types.
+fn downcast_timestamp_columns(
+    batch: RecordBatch,
+    partitions_schema: &StructType,
+) -> DeltaResult<RecordBatch> {
+    // quick exit in case we don't have Timestamp partition columns
+    if !partitions_schema.fields().any(|f|
+        f.data_type == DataType::TIMESTAMP || f.data_type == DataType::TIMESTAMP_NTZ) {
+        return Ok(batch);
+    }
+
+    let schema = batch.schema();
+    let add_col = ex::extract_and_cast::<StructArray>(&batch, "add")?;
+    let (add_idx, _) = schema.column_with_name("add").unwrap();
+
+    // let tmp = ArrowSchema::new(partitions_schema.into());
+    // Replace the schema for `add.partitionValues_parsed` with the correct table types
+    let updated_schema: ArrowSchema = partitions_schema.try_into_arrow()?;
+    let add_type = add_col
+        .fields()
+        .iter()
+        .cloned()
+        .map(|f| {
+            if f.name() == "partitionValues_parsed" {
+                Arc::new(ArrowField::new(
+                    "partitionValues_parsed",
+                    ArrowDataType::Struct(updated_schema.fields().clone()),
+                    false,
+                ))
+            } else {
+                f
+            }
+        })
+        .collect_vec();
+
+    let new_add_field = Arc::new(ArrowField::new(
+        "add",
+        ArrowDataType::Struct(add_type.into()),
+        true,
+    ));
+
+    let mut fields = schema.fields().to_vec();
+    let _ = std::mem::replace(&mut fields[add_idx], new_add_field);
+
+    // We could probably optimize this further by only casting the StructArray from
+    // partitionValues_parsed, but cast_struct is not public, so we chose this for simplicity.
+    // This workaround should not be needed after the upgrade to delta-kernel 0.10.0 and arrow 55.
+    cast_record_batch(
+        &batch,
+        Arc::new(ArrowSchema::new(fields)),
+        false,
+        true,
+    )
 }
 
 /// parse the serialized stats in the  `add.stats` column in the files batch
