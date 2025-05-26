@@ -1,11 +1,11 @@
-use std::fmt;
-
 use arrow_ipc::reader::FileReader;
-use arrow_ipc::writer::FileWriter;
+use arrow_ipc::writer::{FileWriter, IpcWriteOptions};
+use arrow_ipc::CompressionType;
 use chrono::{TimeZone, Utc};
 use object_store::ObjectMeta;
 use serde::de::{self, Deserializer, SeqAccess, Visitor};
 use serde::{ser::SerializeSeq, Deserialize, Serialize};
+use std::fmt;
 
 use super::log_segment::LogSegment;
 use super::EagerSnapshot;
@@ -134,8 +134,12 @@ impl Serialize for EagerSnapshot {
         seq.serialize_element(&self.transactions)?;
         for batch in self.files.iter() {
             let mut buffer = vec![];
-            let mut writer = FileWriter::try_new(&mut buffer, batch.schema().as_ref())
+            let options = IpcWriteOptions::default()
+                .try_with_compression(Some(CompressionType::ZSTD))
                 .map_err(serde::ser::Error::custom)?;
+            let mut writer =
+                FileWriter::try_new_with_options(&mut buffer, batch.schema().as_ref(), options)
+                    .map_err(serde::ser::Error::custom)?;
             writer.write(batch).map_err(serde::ser::Error::custom)?;
             writer.finish().map_err(serde::ser::Error::custom)?;
             let data = writer.into_inner().map_err(serde::ser::Error::custom)?;
