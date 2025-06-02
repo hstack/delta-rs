@@ -194,6 +194,38 @@ impl LogSegment {
         Ok(segment)
     }
 
+    /// Try to create a new [`LogSegment`] from a slice of the log.
+    ///
+    /// This will create a new [`LogSegment`] from the log with JUST relevant commit log files
+    /// starting at `start_version` and ending at `end_version`.
+    /// This ignores check point files, allowing to reconstruct a pseudo-changelog for quick preview
+    /// of recent data.
+    pub async fn try_recent_commits(
+        table_root: &Path,
+        start_version: i64,
+        store: &dyn ObjectStore,
+        max_commits: usize,
+    ) -> DeltaResult<Self> {
+        debug!("try_recent_commits: start_version: {start_version}",);
+        let log_url = table_root.child("_delta_log");
+        let mut commit_files =
+            list_commit_files(store, &log_url, None, Some(start_version)).await?;
+
+        // max count of commits to load without starting from checkpoint
+        commit_files.truncate(max_commits);
+
+        let mut segment = Self {
+            version: start_version,
+            commit_files: commit_files.into(),
+            checkpoint_files: vec![],
+        };
+        segment.version = segment.file_version().unwrap_or(start_version);
+
+        segment.validate()?;
+
+        Ok(segment)
+    }
+
     pub fn validate(&self) -> DeltaResult<()> {
         let is_contiguous = self
             .commit_files
@@ -574,6 +606,39 @@ pub(super) async fn list_log_files(
     commit_files.sort_unstable_by(|a, b| b.location.cmp(&a.location));
 
     Ok((commit_files, checkpoint_files))
+}
+
+/// List relevant commit files, ignoring checkpoints
+///
+/// See `try_recent_commits` for more details on how this is used
+pub(super) async fn list_commit_files(
+    fs_client: &dyn ObjectStore,
+    log_root: &Path,
+    max_version: Option<i64>,
+    start_version: Option<i64>,
+) -> DeltaResult<Vec<ObjectMeta>> {
+    let max_version = max_version.unwrap_or(i64::MAX - 1);
+    let start_from = log_root.child(format!("{:020}", start_version.unwrap_or(0)).as_str());
+
+    let mut commit_files = Vec::with_capacity(25);
+
+    for meta in fs_client
+        .list_with_offset(Some(log_root), &start_from)
+        .try_collect::<Vec<_>>()
+        .await?
+    {
+        if meta.location.commit_version().unwrap_or(i64::MAX) <= max_version
+            && meta.location.commit_version() >= start_version
+            && meta.location.is_commit_file()
+        {
+            commit_files.push(meta);
+        }
+    }
+
+    // NOTE this will sort in reverse order
+    commit_files.sort_unstable_by(|a, b| b.location.cmp(&a.location));
+
+    Ok(commit_files)
 }
 
 #[cfg(test)]

@@ -15,17 +15,18 @@
 //!
 //!
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{BufRead, BufReader, Cursor};
 use std::sync::Arc;
 
-use ::serde::{Deserialize, Serialize};
 use arrow_array::RecordBatch;
 use futures::stream::BoxStream;
 use futures::{StreamExt, TryStreamExt};
+use itertools::Itertools;
 use object_store::path::Path;
-use object_store::ObjectStore;
-use tracing::warn;
+use object_store::{ObjectMeta, ObjectStore};
+use ::serde::{Deserialize, Serialize};
+use tracing::{debug, info, warn};
 
 use self::log_segment::{LogSegment, PathExt};
 use self::parse::{read_adds, read_removes};
@@ -72,7 +73,17 @@ impl Snapshot {
         config: DeltaTableConfig,
         version: Option<i64>,
     ) -> DeltaResult<Self> {
-        let log_segment = LogSegment::try_new(table_root, version, store.as_ref()).await?;
+        let log_segment = if config.pseudo_cdf {
+            // we need the full changes for metadata loading
+            info!(
+                "Loading table with pseudo-cdf, target version is: {:?}",
+                version
+            );
+            LogSegment::try_new(table_root, None, store.as_ref()).await?
+        } else {
+            // classic behaviour, only load metadata up to version
+            LogSegment::try_new(table_root, version, store.as_ref()).await?
+        };
         let (protocol, metadata) = log_segment.read_metadata(store.clone(), &config).await?;
         if metadata.is_none() || protocol.is_none() {
             return Err(DeltaTableError::Generic(
@@ -83,6 +94,54 @@ impl Snapshot {
         let schema = serde_json::from_str(&metadata.schema_string)?;
 
         PROTOCOL.can_read_from_protocol(&protocol)?;
+
+        // TODO: extract to helper function
+        let log_segment = if config.pseudo_cdf {
+            // unless provided with a start version, we only load the last commit
+            let start_version = version.unwrap_or(log_segment.version);
+
+            // check if we already have loaded the needed version, discarding VACUUM commits
+            let min_version = log_segment
+                .commit_files
+                .iter()
+                // simple heuristic for ruling out VACUUM commits (in practice ~900 bytes)
+                // if this fails, we would need to use commits_stream() and look explicitly for adds
+                .filter(|f| f.size > 1500)
+                .filter_map(|f| f.location.commit_version())
+                .min()
+                .unwrap_or(i64::MAX);
+
+            if start_version >= min_version {
+                let mut recent_commits: VecDeque<ObjectMeta> = log_segment
+                    .commit_files
+                    .iter()
+                    // go back 2 more commits in order to make sure we skip over VACUUM start & end
+                    .filter(|f| f.location.commit_version().unwrap_or(0) >= start_version - 2)
+                    .cloned()
+                    .collect();
+                recent_commits.truncate(config.pseudo_cdf_max_commits);
+                debug!("Reusing existing log files: {:?}", recent_commits);
+                LogSegment {
+                    version: log_segment.version,
+                    commit_files: recent_commits,
+                    checkpoint_files: vec![],
+                }
+            } else {
+                // go back 2 more commits in order to make sure we skip over VACUUM start & end
+                let start_version = (start_version - 2).max(0);
+                let segment = LogSegment::try_recent_commits(
+                    table_root,
+                    start_version,
+                    store.as_ref(),
+                    config.pseudo_cdf_max_commits,
+                )
+                .await?;
+                debug!("Version not found after checkpoint, reloading slice from version: {start_version}: {:?}", segment.commit_files);
+                segment
+            }
+        } else {
+            log_segment
+        };
 
         Ok(Self {
             log_segment,
