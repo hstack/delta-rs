@@ -38,6 +38,11 @@ pub struct DeltaTableConfig {
     /// Hence, DeltaTable will be loaded with significant memory reduction.
     pub require_files: bool,
 
+    /// Enables "pseudo-changelog" by only loading JSON commit files starting with specified version
+    /// Please note that the meaning of version or datestring is flipped, instead of loading data
+    /// UP TO the version, it will now load data added AFTER this version
+    pub pseudo_cdf: bool,
+
     /// Controls how many files to buffer from the commit log when updating the table.
     /// This defaults to 4 * number of cpus
     ///
@@ -64,6 +69,7 @@ impl Default for DeltaTableConfig {
     fn default() -> Self {
         Self {
             require_files: true,
+            pseudo_cdf: false,
             log_buffer_size: num_cpus::get() * 4,
             log_batch_size: 1024,
             io_runtime: None,
@@ -146,6 +152,12 @@ impl DeltaTableBuilder {
     /// Sets `require_files=false` to the builder
     pub fn without_files(mut self) -> Self {
         self.table_config.require_files = false;
+        self
+    }
+
+    /// Sets `require_files=false` to the builder
+    pub fn with_pseudo_cdf(mut self) -> Self {
+        self.table_config.pseudo_cdf = true;
         self
     }
 
