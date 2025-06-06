@@ -204,6 +204,7 @@ impl LogSegment {
         table_root: &Path,
         start_version: i64,
         store: &dyn ObjectStore,
+        max_commits: usize,
     ) -> DeltaResult<Self> {
         debug!("try_recent_commits: start_version: {start_version}",);
         let log_url = table_root.child("_delta_log");
@@ -211,8 +212,7 @@ impl LogSegment {
             list_commit_files(store, &log_url, None, Some(start_version)).await?;
 
         // max count of commits to load without starting from checkpoint
-        // TODO: make this configurable
-        commit_files.truncate(100);
+        commit_files.truncate(max_commits);
 
         let mut segment = Self {
             version: start_version,

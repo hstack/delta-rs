@@ -112,13 +112,14 @@ impl Snapshot {
                 .unwrap_or(i64::MAX);
 
             if start_version >= min_version {
-                let recent_commits: VecDeque<ObjectMeta> = log_segment
+                let mut recent_commits: VecDeque<ObjectMeta> = log_segment
                     .commit_files
                     .iter()
                     // go back 2 more commits in order to make sure we skip over VACUUM start & end
                     .filter(|f| f.location.commit_version().unwrap_or(0) >= start_version - 2)
                     .cloned()
                     .collect();
+                recent_commits.truncate(config.pseudo_cdf_max_commits);
                 debug!("Reusing existing log files: {:?}", recent_commits);
                 LogSegment {
                     version: log_segment.version,
@@ -128,7 +129,13 @@ impl Snapshot {
             } else {
                 // go back 2 more commits in order to make sure we skip over VACUUM start & end
                 let start_version = (start_version - 2).max(0);
-                let segment = LogSegment::try_recent_commits(table_root, start_version, store.as_ref()).await?;
+                let segment = LogSegment::try_recent_commits(
+                    table_root,
+                    start_version,
+                    store.as_ref(),
+                    config.pseudo_cdf_max_commits,
+                )
+                .await?;
                 debug!("Version not found after checkpoint, reloading slice from version: {start_version}: {:?}", segment.commit_files);
                 segment
             }
