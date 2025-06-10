@@ -66,12 +66,14 @@ use datafusion::logical_expr::{
     Volatility,
 };
 use datafusion::optimizer::simplify_expressions::ExprSimplifier;
-use datafusion::physical_expr::PhysicalExpr;
 use datafusion::physical_optimizer::pruning::{PruningPredicate, PruningStatistics};
-use datafusion::physical_plan::filter::FilterExec;
-use datafusion::physical_plan::limit::LocalLimitExec;
-use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricBuilder, MetricsSet};
-use datafusion::physical_plan::{
+use datafusion_physical_expr::{create_physical_expr, PhysicalExpr};
+use datafusion_physical_plan::filter::FilterExec;
+use datafusion_physical_plan::limit::{GlobalLimitExec, LocalLimitExec};
+use datafusion_physical_plan::memory::{LazyBatchGenerator, LazyMemoryExec};
+use datafusion_physical_plan::metrics::{ExecutionPlanMetricsSet, MetricBuilder, MetricsSet};
+use datafusion_physical_plan::projection::ProjectionExec;
+use datafusion_physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, SendableRecordBatchStream,
     Statistics,
 };
@@ -93,7 +95,7 @@ use crate::errors::{DeltaResult, DeltaTableError};
 use crate::kernel::{
     Add, DataCheck, EagerSnapshot, Invariant, LogDataHandler, Snapshot, StructTypeExt,
 };
-use crate::logstore::LogStoreRef;
+use crate::logstore::{logstore_for, object_store_url, LogStoreRef, StorageConfig};
 use crate::table::builder::ensure_table_uri;
 use crate::table::state::DeltaTableState;
 use crate::table::{Constraint, GeneratedColumn};
@@ -359,6 +361,7 @@ pub struct DeltaScanConfigBuilder {
     enable_parquet_pushdown: bool,
     /// Schema to scan table with
     schema: Option<SchemaRef>,
+    options: HashMap<String, String>,
 }
 
 impl Default for DeltaScanConfigBuilder {
@@ -369,6 +372,7 @@ impl Default for DeltaScanConfigBuilder {
             wrap_partition_values: None,
             enable_parquet_pushdown: true,
             schema: None,
+            options: HashMap::new(),
         }
     }
 }
@@ -413,6 +417,11 @@ impl DeltaScanConfigBuilder {
         self
     }
 
+    pub fn with_options(mut self, options: HashMap<String, String>) -> Self {
+        self.options = options;
+        self
+    }
+
     /// Build a DeltaScanConfig and ensure no column name conflicts occur during downstream processing
     pub fn build(&self, snapshot: &DeltaTableState) -> DeltaResult<DeltaScanConfig> {
         let file_column_name = if self.include_file_column {
@@ -454,6 +463,7 @@ impl DeltaScanConfigBuilder {
             wrap_partition_values: self.wrap_partition_values.unwrap_or(true),
             enable_parquet_pushdown: self.enable_parquet_pushdown,
             schema: self.schema.clone(),
+            options: self.options.clone(),
         })
     }
 }
@@ -469,6 +479,8 @@ pub struct DeltaScanConfig {
     pub enable_parquet_pushdown: bool,
     /// Schema to read as
     pub schema: Option<SchemaRef>,
+
+    pub options: HashMap<String, String>,
 }
 
 pub(crate) struct DeltaScanBuilder<'a> {
@@ -864,11 +876,15 @@ impl TableProvider for DeltaTable {
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
         register_store(self.log_store(), session.runtime_env().clone());
         let filter_expr = conjunction(filters.iter().cloned());
+        let config = DeltaScanConfigBuilder::default()
+            .with_options(self.config.options.clone())
+            .build(self.snapshot()?)?;
 
         let scan = DeltaScanBuilder::new(self.snapshot()?, self.log_store(), session)
             .with_projection(projection)
             .with_limit(limit)
             .with_filter(filter_expr)
+            .with_scan_config(config)
             .build()
             .await?;
 
@@ -885,12 +901,16 @@ impl TableProvider for DeltaTable {
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
         register_store(self.log_store(), session.runtime_env().clone());
         let filter_expr = conjunction(filters.iter().cloned());
+        let config = DeltaScanConfigBuilder::default()
+            .with_options(self.config.options.clone())
+            .build(self.snapshot()?)?;
 
         let scan = DeltaScanBuilder::new(self.snapshot()?, self.log_store(), session)
             .with_projection(projection)
             .with_projection_deep(projection_deep)
             .with_limit(limit)
             .with_filter(filter_expr)
+            .with_scan_config(config)
             .build()
             .await?;
 
@@ -1166,6 +1186,28 @@ impl ExecutionPlan for DeltaScan {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> DataFusionResult<SendableRecordBatchStream> {
+        let source_uri = Url::parse(self.table_uri.as_str())
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        let url_key = object_store_url(&source_uri);
+        let runtime = context.runtime_env();
+        // self.config
+        if runtime.object_store(url_key).is_err() {
+            let storage_config = StorageConfig::parse_options(
+                self.config.options.clone()
+            )?;
+            let source_store = logstore_for(source_uri,storage_config)
+                .map_err(|e| DataFusionError::External(Box::new(e)))?;
+            let object_store_url = source_store.object_store_url();
+
+            // check if delta store is already registered
+            if runtime.object_store(object_store_url.clone()).is_err() {
+                runtime.register_object_store(
+                    object_store_url.as_ref(),
+                    source_store.object_store(None),
+                );
+            }
+        }
+        // Now that everything is set up, execute the inner Delta
         self.parquet_scan.execute(partition, context)
     }
 
