@@ -55,6 +55,9 @@ pub struct DeltaTableConfig {
     #[delta(skip)]
     /// When a runtime handler is provided, all IO tasks are spawn in that handle
     pub io_runtime: Option<IORuntime>,
+
+    #[delta(skip)]
+    pub options: HashMap<String, String>
 }
 
 impl Default for DeltaTableConfig {
@@ -64,6 +67,7 @@ impl Default for DeltaTableConfig {
             log_buffer_size: num_cpus::get() * 4,
             log_batch_size: 1024,
             io_runtime: None,
+            options: HashMap::new(),
         }
     }
 }
@@ -211,6 +215,7 @@ impl DeltaTableBuilder {
             storage_options
                 .clone()
                 .into_iter()
+                .map(|(k, v)| (k.strip_prefix("deltalake.").map(ToString::to_string).unwrap_or(k), v))
                 .map(|(k, v)| {
                     let needs_trim = v.starts_with("http://")
                         || v.starts_with("https://")
@@ -279,7 +284,10 @@ impl DeltaTableBuilder {
     /// This will not load the log, i.e. the table is not initialized. To get an initialized
     /// table use the `load` function
     pub fn build(self) -> DeltaResult<DeltaTable> {
-        Ok(DeltaTable::new(self.build_storage()?, self.table_config))
+        let log_store = self.build_storage()?;
+        let mut config = self.table_config;
+        config.options = self.storage_options.unwrap_or_default();
+        Ok(DeltaTable::new(log_store, config))
     }
 
     /// Build the [`DeltaTable`] and load its state
