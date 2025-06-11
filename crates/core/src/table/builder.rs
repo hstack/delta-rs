@@ -38,6 +38,14 @@ pub struct DeltaTableConfig {
     /// Hence, DeltaTable will be loaded with significant memory reduction.
     pub require_files: bool,
 
+    /// Enables "pseudo-changelog" by only loading JSON commit files starting with specified version
+    /// Please note that the meaning of version or datestring is flipped, instead of loading data
+    /// UP TO the version, it will now load data added AFTER this version
+    pub pseudo_cdf: bool,
+
+    /// Max number of commits to load
+    pub pseudo_cdf_max_commits: usize,
+
     /// Controls how many files to buffer from the commit log when updating the table.
     /// This defaults to 4 * number of cpus
     ///
@@ -57,13 +65,15 @@ pub struct DeltaTableConfig {
     pub io_runtime: Option<IORuntime>,
 
     #[delta(skip)]
-    pub options: HashMap<String, String>
+    pub options: HashMap<String, String>,
 }
 
 impl Default for DeltaTableConfig {
     fn default() -> Self {
         Self {
             require_files: true,
+            pseudo_cdf: false,
+            pseudo_cdf_max_commits: 1024,
             log_buffer_size: num_cpus::get() * 4,
             log_batch_size: 1024,
             io_runtime: None,
@@ -149,6 +159,23 @@ impl DeltaTableBuilder {
         self
     }
 
+    /// Sets `pseudo_cdf=true` to the builder
+    pub fn with_pseudo_cdf(mut self) -> Self {
+        self.table_config.pseudo_cdf = true;
+        self
+    }
+
+    /// Sets `log_buffer_size` to the builder
+    pub fn with_pseudo_cdf_max_commits(mut self, max_commits: usize) -> DeltaResult<Self> {
+        if max_commits == 0 {
+            return Err(DeltaTableError::Generic(String::from(
+                "Max number of commits should be positive",
+            )));
+        }
+        self.table_config.pseudo_cdf_max_commits = max_commits;
+        Ok(self)
+    }
+
     /// Sets `version` to the builder
     pub fn with_version(mut self, version: i64) -> Self {
         self.version = DeltaVersion::Version(version);
@@ -215,7 +242,14 @@ impl DeltaTableBuilder {
             storage_options
                 .clone()
                 .into_iter()
-                .map(|(k, v)| (k.strip_prefix("deltalake.").map(ToString::to_string).unwrap_or(k), v))
+                .map(|(k, v)| {
+                    (
+                        k.strip_prefix("deltalake.")
+                            .map(ToString::to_string)
+                            .unwrap_or(k),
+                        v,
+                    )
+                })
                 .map(|(k, v)| {
                     let needs_trim = v.starts_with("http://")
                         || v.starts_with("https://")

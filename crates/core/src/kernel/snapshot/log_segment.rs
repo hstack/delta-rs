@@ -135,6 +135,48 @@ impl LogSegment {
         Ok(segment)
     }
 
+    /// Try to create a new [`LogSegment`] from a slice of the log.
+    ///
+    /// This will create a new [`LogSegment`] from the log with JUST relevant commit log files
+    /// starting at `start_version` and ending at `end_version`.
+    /// This ignores check point files, allowing to reconstruct a pseudo-changelog for quick preview
+    /// of recent data.
+    pub async fn try_recent_commits(
+        log_store: &dyn LogStore,
+        start_version: i64,
+        max_commits: usize,
+    ) -> DeltaResult<Self> {
+        debug!("try_recent_commits: start_version: {start_version}",);
+        log_store.refresh().await?;
+        let log_url = log_store.log_root_url();
+        let mut store_root = log_url.clone();
+        store_root.set_path("");
+        let log_path = crate::logstore::object_store_path(&log_url)?;
+
+        let mut commit_files = list_commit_files(
+            &log_store.root_object_store(None),
+            &log_path,
+            None,
+            Some(start_version),
+            &store_root,
+        )
+        .await?;
+
+        // max count of commits to load without starting from checkpoint
+        commit_files.truncate(max_commits);
+
+        validate(&commit_files, &vec![])?;
+
+        let mut segment = Self {
+            version: start_version,
+            commit_files: commit_files.into_iter().map(|(meta, _)| meta).collect(),
+            checkpoint_files: vec![],
+        };
+        segment.version = segment.file_version().unwrap_or(start_version);
+
+        Ok(segment)
+    }
+
     /// Returns the highest commit version number in the log segment
     pub fn file_version(&self) -> Option<i64> {
         let dummy_url = Url::parse("dummy:///").unwrap();
@@ -551,6 +593,45 @@ pub(super) async fn list_log_files(
     commit_files.sort_unstable_by(|a, b| b.0.location.cmp(&a.0.location));
 
     Ok((commit_files, checkpoint_files))
+}
+
+/// List relevant commit files, ignoring checkpoints
+///
+/// See `try_recent_commits` for more details on how this is used
+pub(super) async fn list_commit_files(
+    root_store: &dyn ObjectStore,
+    log_root: &Path,
+    max_version: Option<i64>,
+    start_version: Option<i64>,
+    store_root: &Url,
+) -> DeltaResult<Vec<(ObjectMeta, ParsedLogPath<Url>)>> {
+    let max_version = max_version.unwrap_or(i64::MAX - 1);
+    let start_from = log_root.child(format!("{:020}", start_version.unwrap_or(0)).as_str());
+
+    let mut commit_files = Vec::with_capacity(25);
+
+    for meta in root_store
+        .list_with_offset(Some(log_root), &start_from)
+        .try_collect::<Vec<_>>()
+        .await?
+        .into_iter()
+        .filter_map(|f| {
+            let file_url = store_root.join(f.location.as_ref()).ok()?;
+            let path = ParsedLogPath::try_from(file_url).ok()??;
+            Some((f, path))
+        })
+    {
+        if meta.1.version <= max_version as u64
+            && Some(meta.1.version as i64) >= start_version
+            && matches!(meta.1.file_type, LogPathFileType::Commit){
+                commit_files.push(meta);
+        }
+    }
+
+    // NOTE this will sort in reverse order
+    commit_files.sort_unstable_by(|a, b| b.0.location.cmp(&a.0.location));
+
+    Ok(commit_files)
 }
 
 #[cfg(test)]
