@@ -213,15 +213,13 @@ pub fn cast_record_batch(
                 batch.num_rows(),
             )?
         } else {
-	    // Can be simplified with StructArray::try_new_with_length in arrow 55.1
-	    let col_arrays = batch.columns().to_owned();
-	    let s = if col_arrays.is_empty() {
-	        StructArray::new_empty_fields(batch.num_rows(), None)
-	    } else {
-	        StructArray::new(batch.schema().as_ref().to_owned().fields, col_arrays, None)
-	    };
-
-	    cast_struct(&s, target_schema.fields(), &cast_options, add_missing)?
+            let s = StructArray::try_new_with_length(
+                batch.schema().as_ref().to_owned().fields,
+                batch.columns().to_owned(),
+                None,
+                batch.num_rows(),
+            )?;
+            cast_struct(&s, target_schema.fields(), &cast_options, add_missing)?
         };
     Ok(RecordBatch::try_new_with_options(
         target_schema,
