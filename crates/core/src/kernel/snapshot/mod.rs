@@ -18,15 +18,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{BufRead, BufReader, Cursor};
 
-use arrow_array::RecordBatch;
-use delta_kernel::path::{LogPathFileType, ParsedLogPath};
-use futures::stream::BoxStream;
-use futures::{StreamExt, TryStreamExt};
-use object_store::path::Path;
-use object_store::{ObjectMeta, ObjectStore};
-use ::serde::{Deserialize, Serialize};
-use tracing::log::{debug, info};
-use url::Url;
 use self::log_segment::LogSegment;
 use self::parse::{read_adds, read_removes};
 use self::replay::{LogMapper, LogReplayScanner, ReplayStream};
@@ -39,6 +30,15 @@ use crate::kernel::{ActionType, StructType};
 use crate::logstore::{LogStore, LogStoreExt};
 use crate::table::config::TableConfig;
 use crate::{DeltaResult, DeltaTableConfig, DeltaTableError};
+use arrow_array::RecordBatch;
+use delta_kernel::path::{LogPathFileType, ParsedLogPath};
+use futures::stream::BoxStream;
+use futures::{StreamExt, TryStreamExt};
+use object_store::path::Path;
+use object_store::{ObjectMeta, ObjectStore};
+use ::serde::{Deserialize, Serialize};
+use tracing::log::{debug, info};
+use url::Url;
 
 pub use self::log_data::*;
 
@@ -95,10 +95,33 @@ impl Snapshot {
 
         PROTOCOL.can_read_from_protocol(&protocol)?;
 
-
         let mut store_root = log_store.table_root_url().clone();
         store_root.set_path("");
 
+        // Check if the log segment size exceeds the configured maximum
+        if let Some(max_size) = config.max_log_bytes {
+            let total_size: u64 = log_segment
+                .checkpoint_files
+                .iter()
+                .chain(log_segment.commit_files.iter())
+                .map(|f| f.size)
+                .sum();
+            if total_size > max_size as u64 {
+                if config.pseudo_cdf {
+                    // Use pseudo_cdf as fallback when table is too large
+                    info!(
+                        "Log segment size ({} bytes) exceeds max_log_size ({} bytes), using pseudo_cdf fallback",
+                        total_size, max_size
+                    );
+                } else {
+                    return Err(DeltaTableError::Generic(format!(
+                        "Table log segment size ({} bytes) exceeds maximum allowed size ({} bytes). \
+                         Consider enabling pseudo_cdf mode or increasing max_log_size.",
+                        total_size, max_size
+                    )));
+                }
+            }
+        }
 
         // TODO: extract to helper function
         let log_segment = if config.pseudo_cdf {
@@ -137,7 +160,7 @@ impl Snapshot {
                     .cloned()
                     .collect();
                 recent_commits.truncate(config.pseudo_cdf_max_commits);
-                    debug!("Reusing existing log files: {:?}", recent_commits);
+                debug!("Reusing existing log files: {:?}", recent_commits);
                 LogSegment {
                     version: log_segment.version,
                     commit_files: recent_commits,

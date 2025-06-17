@@ -59,6 +59,12 @@ pub struct DeltaTableConfig {
     /// when processing record batches.
     pub log_batch_size: usize,
 
+    /// Maximum allowed size in bytes for the total log segment (checkpoint + commit files).
+    /// If the log segment exceeds this size, the table loading will fail unless `pseudo_cdf`
+    /// is enabled, in which case it will be used as a fallback.
+    /// If `None`, no size limit is enforced.
+    pub max_log_bytes: Option<usize>,
+
     #[serde(skip_serializing, skip_deserializing)]
     #[delta(skip)]
     /// When a runtime handler is provided, all IO tasks are spawn in that handle
@@ -76,6 +82,7 @@ impl Default for DeltaTableConfig {
             pseudo_cdf_max_commits: 1024,
             log_buffer_size: num_cpus::get() * 4,
             log_batch_size: 1024,
+            max_log_bytes: None,
             io_runtime: None,
             options: HashMap::new(),
         }
@@ -87,6 +94,9 @@ impl PartialEq for DeltaTableConfig {
         self.require_files == other.require_files
             && self.log_buffer_size == other.log_buffer_size
             && self.log_batch_size == other.log_batch_size
+            && self.pseudo_cdf == other.pseudo_cdf
+            && self.pseudo_cdf_max_commits == other.pseudo_cdf_max_commits
+            && self.max_log_bytes == other.max_log_bytes
     }
 }
 
@@ -190,6 +200,17 @@ impl DeltaTableBuilder {
             )));
         }
         self.table_config.log_buffer_size = log_buffer_size;
+        Ok(self)
+    }
+
+    /// Sets `max_log_bytes` to the builder
+    pub fn with_max_log_bytes(mut self, max_log_size: usize) -> DeltaResult<Self> {
+        if max_log_size == 0 {
+            return Err(DeltaTableError::Generic(String::from(
+                "Max log size should be positive",
+            )));
+        }
+        self.table_config.max_log_bytes = Some(max_log_size);
         Ok(self)
     }
 
