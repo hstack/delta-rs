@@ -73,12 +73,7 @@ impl Snapshot {
         config: DeltaTableConfig,
         version: Option<i64>,
     ) -> DeltaResult<Self> {
-        let log_segment = if config.pseudo_cdf {
-            // we need the full changes for metadata loading
-            info!(
-                "Loading table with pseudo-cdf, target version is: {:?}",
-                version
-            );
+        let log_segment = if config.pseudo_cdf && config.max_log_bytes.is_some() {
             LogSegment::try_new(log_store, None).await?
         } else {
             // classic behaviour, only load metadata up to version
@@ -99,14 +94,15 @@ impl Snapshot {
         store_root.set_path("");
 
         // Check if the log segment size exceeds the configured maximum
-        if let Some(max_size) = config.max_log_bytes {
+        let should_fall_back = if let Some(max_size) = config.max_log_bytes {
             let total_size: u64 = log_segment
                 .checkpoint_files
                 .iter()
                 .chain(log_segment.commit_files.iter())
                 .map(|f| f.size)
                 .sum();
-            if total_size > max_size as u64 {
+            let total_size = total_size as usize;
+            if total_size > max_size {
                 if config.pseudo_cdf {
                     // Use pseudo_cdf as fallback when table is too large
                     info!(
@@ -120,11 +116,19 @@ impl Snapshot {
                         total_size, max_size
                     )));
                 }
-            }
-        }
+            } else {
+                info!(
+                        "Log segment size ({} bytes) is under max_log_size ({} bytes), loading full table",
+                        total_size, max_size
+                    );
+            };
+            total_size > max_size
+        } else {
+            false
+        };
 
         // TODO: extract to helper function
-        let log_segment = if config.pseudo_cdf {
+        let log_segment = if config.pseudo_cdf && should_fall_back {
             // unless provided with a start version, we only load the last commit
             let start_version = version.unwrap_or(log_segment.version);
 
