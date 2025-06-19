@@ -1,6 +1,7 @@
 //! Utilities for converting Arrow arrays into Delta data structures.
 use std::collections::HashMap;
 
+use arrow_arith::aggregate::sum_array_checked;
 use arrow_array::{
     Array, BooleanArray, Int32Array, Int64Array, ListArray, MapArray, StringArray, StructArray,
 };
@@ -182,6 +183,16 @@ pub(super) fn read_adds(array: &dyn ProvidesColumnByName) -> DeltaResult<Vec<Add
     }
 
     Ok(result)
+}
+
+pub(super) fn read_adds_size(array: &dyn ProvidesColumnByName) -> DeltaResult<usize> {
+    if let Some(arr) = ex::extract_and_cast_opt::<StructArray>(array, "add") {
+        let size = ex::extract_and_cast::<Int64Array>(arr, "size")?;
+        let sum = sum_array_checked::<arrow::array::types::Int64Type, _>(size)?.unwrap_or_default();
+        Ok(sum as usize)
+    } else {
+        Ok(0)
+    }
 }
 
 pub(super) fn read_cdf_adds(array: &dyn ProvidesColumnByName) -> DeltaResult<Vec<AddCDCFile>> {
