@@ -649,6 +649,10 @@ impl EagerSnapshot {
         self.files.iter().map(|f| f.num_rows()).sum()
     }
 
+    /// Get the number of files in the snapshot
+    pub fn files_metadata_size(&self) -> usize {
+        self.files.iter().map(|f| f.get_array_memory_size()).sum()
+    }
     /// Get the files in the snapshot
     pub fn file_actions(&self) -> DeltaResult<impl Iterator<Item = Add> + '_> {
         Ok(self.files.iter().flat_map(|b| read_adds(b)).flatten())
