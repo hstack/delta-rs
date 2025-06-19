@@ -33,7 +33,7 @@ use self::replay::{LogMapper, LogReplayScanner, ReplayStream};
 use self::visitors::*;
 use super::arrow::engine_ext::stats_schema_from_config;
 use super::{Action, Add, AddCDCFile, CommitInfo, Metadata, Protocol, Remove, Transaction};
-use crate::kernel::parse::read_cdf_adds;
+use crate::kernel::parse::{read_adds_size, read_cdf_adds};
 use crate::kernel::transaction::{CommitData, PROTOCOL};
 use crate::kernel::{ActionType, StructType};
 use crate::logstore::LogStore;
@@ -552,6 +552,12 @@ impl EagerSnapshot {
     pub fn files_metadata_size(&self) -> usize {
         self.files.iter().map(|f| f.get_array_memory_size()).sum()
     }
+
+    /// Get the number of files in the snapshot
+    pub fn files_total_size(&self) -> usize {
+        self.files.iter().flat_map(|b| read_adds_size(b)).sum()
+    }
+
     /// Get the files in the snapshot
     pub fn file_actions(&self) -> DeltaResult<impl Iterator<Item = Add> + '_> {
         Ok(self.files.iter().flat_map(|b| read_adds(b)).flatten())
