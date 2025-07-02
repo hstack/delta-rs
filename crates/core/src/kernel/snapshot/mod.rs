@@ -56,6 +56,7 @@ pub(crate) mod parse;
 pub(crate) mod replay;
 mod serde;
 mod stream;
+pub mod size_limits;
 
 pub(crate) static SCAN_ROW_ARROW_SCHEMA: LazyLock<arrow_schema::SchemaRef> =
     LazyLock::new(|| Arc::new(scan_row_schema().as_ref().try_into_arrow().unwrap()));
@@ -106,6 +107,14 @@ impl Snapshot {
                     return Err(e.into());
                 }
             }
+        };
+
+        let snapshot = if let Some(limiter) = &config.log_size_limiter {
+            let segment = limiter.truncate(snapshot.log_segment().clone(), log_store).await?;
+            let table_configuration = snapshot.table_configuration().clone();
+            KernelSnapshot::new(segment, table_configuration)
+        } else {
+            snapshot
         };
 
         let schema = snapshot.table_configuration().schema();
