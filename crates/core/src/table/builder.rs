@@ -259,8 +259,7 @@ impl DeltaTableBuilder {
     /// - [S3 options](https://docs.rs/object_store/latest/object_store/aws/enum.AmazonS3ConfigKey.html#variants)
     /// - [Google options](https://docs.rs/object_store/latest/object_store/gcp/enum.GoogleConfigKey.html#variants)
     pub fn with_storage_options(mut self, storage_options: HashMap<String, String>) -> Self {
-        self.storage_options = Some(
-            storage_options
+        let mut opts: HashMap<String, String> = storage_options
                 .clone()
                 .into_iter()
                 .map(|(k, v)| {
@@ -281,8 +280,18 @@ impl DeltaTableBuilder {
                         (k, v)
                     }
                 })
-                .collect(),
-        );
+                .collect();
+        // propagate pseudo_cdf settings via storage_options for python or `create external table`
+        if let Some(pseudo_cdf) = opts.remove("pseudo_cdf") {
+            self.table_config.pseudo_cdf = pseudo_cdf.parse()
+                .expect(format!("pseudo_cdf must be a boolean, got {pseudo_cdf}").as_str());
+        }
+        if let Some(max_commits) = opts.remove("pseudo_cdf_max_commits") {
+            self.table_config.pseudo_cdf_max_commits =
+                max_commits.parse()
+                    .expect(format!("pseudo_cdf_max_commits must be a positive int, got {max_commits}").as_str());
+        }
+        self.storage_options = Some(opts);
         self
     }
 
