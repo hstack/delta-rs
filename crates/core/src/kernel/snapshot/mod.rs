@@ -48,6 +48,7 @@ pub(crate) mod parse;
 mod replay;
 mod serde;
 pub mod visitors;
+pub mod size_limits;
 
 /// A snapshot of a Delta table
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -79,6 +80,11 @@ impl Snapshot {
             return Err(DeltaTableError::Generic(
                 "Cannot read metadata from log segment".into(),
             ));
+        };
+        let log_segment = if let Some(limiter) = &config.log_size_limiter {
+            limiter.truncate(log_segment, log_store).await?
+        } else {
+            log_segment
         };
         let (metadata, protocol) = (metadata.unwrap(), protocol.unwrap());
         let schema = serde_json::from_str(&metadata.schema_string)?;
