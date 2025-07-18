@@ -82,7 +82,7 @@ impl Snapshot {
             ));
         };
         let log_segment = if let Some(limiter) = &config.log_size_limiter {
-            limiter.coerce(log_segment, log_store).await?
+            limiter.truncate(log_segment, log_store).await?
         } else {
             log_segment
         };
