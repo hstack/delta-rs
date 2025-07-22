@@ -108,6 +108,7 @@ pub mod expr;
 pub mod logical;
 pub mod physical;
 pub mod planner;
+pub mod udtf;
 
 pub use cdf::scan::DeltaCdfTableProvider;
 
