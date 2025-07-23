@@ -85,6 +85,7 @@ pub mod physical;
 pub mod planner;
 mod schema_adapter;
 mod table_provider;
+pub mod udtf;
 
 pub use cdf::scan::DeltaCdfTableProvider;
 pub(crate) use table_provider::DeltaScanBuilder;
