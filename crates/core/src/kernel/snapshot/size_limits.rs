@@ -147,6 +147,7 @@ async fn list_commit_files(
         .await?
         .into_iter()
         .filter(|obj_meta| obj_meta.location.extension() == Some("json"))
+        .filter(|obj_meta| obj_meta.location.filename().unwrap_or("").len() == 25)  // "{version:020}.json"
         .filter(|obj_meta| obj_meta.location < upper_bound)
         .collect::<Vec<_>>();
     // reverse sort by version using the file names, as per the Delta Lake specification
@@ -358,6 +359,25 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn test_compacted_json_files_are_ignored() -> DeltaResult<()> {
+        let extra_files = vec![
+            format!("{:020}.{:020}.compacted.json", 15, 19),
+        ];
+        let log_store = TestLogStore::new(
+            CommitRange(0..=100), CheckpointCadence(10), CommitFsize(10), CheckpointFsize(1000)
+        ).with_additional_files(extra_files, 200);
+        let limiter = LogSizeLimiter::new(
+            NonZeroU64::new(500).unwrap(), // smaller than the checkpoint size, can fit 50 commits
+            OversizePolicy::UseTruncatedCommitLog(NonZeroUsize::new(20).unwrap()), // go back 100 commits
+        );
+
+        let segment = LogSegment::try_new(&log_store, Some(23)).await?;
+        assert_segment_with_checkpoint(&segment, 20, 3);
+        assert_segment_with_commits_only(&limiter.truncate(segment, &log_store).await?, 4..=23 );
+        Ok(())
+    }
+
     fn commit_file_name(version: usize) -> String {
         format!("{:020}.json", version)
     }
@@ -470,6 +490,15 @@ mod tests {
                 store
             }
 
+            pub(super) fn with_additional_files(mut self, fnames: Vec<String>, fsize: u64) -> Self {
+                let log_path = object_store_path(&self.log_root_url()).unwrap();
+                let mut files: Vec<ObjectMeta> = fnames.into_iter().map(|fname| obj_meta(log_path.child(fname), fsize))
+                    .collect();
+                self.files.append(&mut files);
+                self.files.shuffle(&mut thread_rng());
+                self
+            }
+
         }
 
         #[async_trait]
@@ -542,8 +571,13 @@ mod tests {
                 unimplemented!("TestLogStore::delete not implemented for tests")
             }
 
-            fn list(&self, _prefix: Option<&Path>) -> BoxStream<'static, ObjectStoreResult<ObjectMeta>> {
-                Box::pin(stream::iter(self.files.clone().into_iter().map(Ok)))
+            fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, ObjectStoreResult<ObjectMeta>> {
+                let log_path = object_store_path(&self.log_root_url());
+                if prefix == log_path.ok().as_ref() {
+                    Box::pin(stream::iter(self.files.clone().into_iter().map(Ok)))
+                } else {
+                    Box::pin(stream::empty())
+                }
             }
 
             async fn list_with_delimiter(&self, _prefix: Option<&Path>) -> ObjectStoreResult<ListResult> {
