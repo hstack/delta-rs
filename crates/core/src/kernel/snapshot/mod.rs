@@ -864,4 +864,9 @@ mod tests {
 
         assert_eq!(snapshot.inner.partitions_schema().unwrap(), None);
     }
+
+    #[tokio::test]
+    async fn test_delta_table_serde() {
+        assert!(true == false, "@atanase Implement me");
+    }
 }
