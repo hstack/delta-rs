@@ -582,6 +582,16 @@ impl EagerSnapshot {
         LogDataHandler::new(&self.files, self.snapshot.table_configuration())
     }
 
+    /// Get the metadata size in the snapshot
+    pub fn files_metadata_size(&self) -> usize {
+        self.files.get_array_memory_size()
+    }
+
+    /// Get the total size of files in the snapshot
+    pub fn files_total_size(&self) -> usize {
+        parse::read_adds_size(&self.files).unwrap_or_default()
+    }
+
     /// Stream the active files in the snapshot
     ///
     /// This function returns a stream of [`LogicalFileView`] objects,
