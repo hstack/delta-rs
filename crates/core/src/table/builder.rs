@@ -120,6 +120,7 @@ impl DeltaTableBuilder {
         }
 
         debug!("creating table builder with {table_uri}");
+        let table_uri = parse_table_uri(&table_uri)?;
 
         Ok(Self {
             table_uri: table_uri.into(),
