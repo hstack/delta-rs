@@ -429,6 +429,10 @@ mod tests {
             vec![ checkpoint_file_name(checkpoint_version) ],
         );
         assert_eq!(
+            segment.latest_commit_file.as_ref().map(|f| &f.filename),
+            Some(&commit_file_name(segment.end_version))
+        );
+        assert_eq!(
             extract_file_names(&segment.ascending_commit_files),
             (checkpoint_version + 1 ..= checkpoint_version + num_subsequent_commits)
                 .map(|v| commit_file_name(v as u64))
@@ -439,6 +443,10 @@ mod tests {
     fn assert_segment_with_commits_only(log_segment: &LogSegment, versions: RangeInclusive<usize>) {
         assert_eq!(log_segment.end_version, *versions.end() as u64);
         assert_eq!(log_segment.checkpoint_parts, vec![]);
+        assert_eq!(
+            log_segment.latest_commit_file.as_ref().map(|f| &f.filename),
+            Some(&commit_file_name(log_segment.end_version)),
+        );
         assert_eq!(
             extract_file_names(&log_segment.ascending_commit_files),
             versions.map(|v| commit_file_name(v as u64)).collect::<Vec<_>>(),
@@ -674,7 +682,7 @@ mod tests {
                 }
             );
 
-            // with checkpoint
+            // with checkpoint and commits
             let segment = create_log_segment(&log_store, Some(32)).await?;
             assert_segment_with_checkpoint(&segment, 30, 2);
             assert_eq!(
@@ -695,6 +703,26 @@ mod tests {
                     latest_commit_file: Some(parsed_log_path("delta_table/_delta_log/00000000000000000032.json", 128)),
                 }
             );
+
+            // with checkpoint only
+            let segment = create_log_segment(&log_store, Some(30)).await?;
+            assert_segment_with_checkpoint(&segment, 30, 0);
+            assert_eq!(
+                segment,
+                LogSegment {
+                    end_version: 30,
+                    ascending_commit_files: vec![],
+                    checkpoint_parts: vec![
+                        parsed_log_path("delta_table/_delta_log/00000000000000000030.checkpoint.parquet", 1024),
+                    ],
+                    ascending_compaction_files: vec![],
+                    log_root: log_store.log_root_url(),
+                    checkpoint_version: Some(30),
+                    latest_crc_file: None,
+                    latest_commit_file: Some(parsed_log_path("delta_table/_delta_log/00000000000000000030.json", 128)),
+                }
+            );
+
 
             // latest version
             let segment = create_log_segment(&log_store, None).await?;
