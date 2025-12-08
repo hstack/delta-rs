@@ -771,7 +771,7 @@ impl TableProvider for DeltaTable {
 
     async fn scan_with_args<'a>(&self, state: &dyn Session, args: ScanArgs<'a>) -> Result<ScanResult> {
         register_store(self.log_store(), state.runtime_env().as_ref());
-        let filter_expr = conjunction(args.filters().iter().cloned());
+        let filter_expr = conjunction(args.filters().unwrap_or_default().iter().cloned());
         let config = DeltaScanConfigBuilder::default()
             .with_options(self.config.options.clone())
             .build(self.snapshot()?.snapshot())?;
@@ -786,7 +786,7 @@ impl TableProvider for DeltaTable {
             .build()
             .await?;
 
-        Ok(Arc::new(scan))
+        Ok(ScanResult::new(Arc::new(scan)))
     }
 
     fn supports_filters_pushdown(
@@ -879,28 +879,22 @@ impl TableProvider for DeltaTableProvider {
         Ok(Arc::new(scan.build().await?))
     }
 
-    async fn scan_deep(
-        &self,
-        session: &dyn Session,
-        projection: Option<&Vec<usize>>,
-        projection_deep: Option<&std::collections::HashMap<usize, Vec<String>>>,
-        filters: &[Expr],
-        limit: Option<usize>,
-    ) -> Result<Arc<dyn ExecutionPlan>> {
-        register_store(self.log_store.clone(), session.runtime_env().as_ref());
-        let filter_expr = conjunction(filters.iter().cloned());
+    async fn scan_with_args<'a>(&self, state: &dyn Session, args: ScanArgs<'a>) -> Result<ScanResult> {
+        register_store(self.log_store.clone(), state.runtime_env().as_ref());
+        let filter_expr = conjunction(args.filters().unwrap_or_default().iter().cloned());
 
-        let mut scan = DeltaScanBuilder::new(&self.snapshot, self.log_store.clone(), session)
-            .with_projection(projection)
-            .with_projection_deep(projection_deep)
-            .with_limit(limit)
+        let projections = args.projection().map(|s| s.to_vec());
+        let mut scan = DeltaScanBuilder::new(&self.snapshot, self.log_store.clone(), state)
+            .with_projection(projections.as_ref())
+            .with_projection_deep(args.projection_deep())
+            .with_limit(args.limit())
             .with_filter(filter_expr)
             .with_scan_config(self.config.clone());
 
         if let Some(files) = &self.files {
             scan = scan.with_files(files);
         }
-        Ok(Arc::new(scan.build().await?))
+        Ok(ScanResult::new(Arc::new(scan.build().await?)))
     }
 
     fn supports_filters_pushdown(
