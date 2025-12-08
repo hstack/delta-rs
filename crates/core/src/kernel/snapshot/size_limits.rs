@@ -185,7 +185,7 @@ mod tests {
     async fn create_log_segment(log_store: &TestLogStore, version: Option<Version>) -> DeltaResult<LogSegment> {
         let storage = log_store.engine(None).storage_handler();
         let log_root = log_store.log_root_url();
-        Ok(LogSegment::for_snapshot(storage.as_ref(), log_root, Vec::new(), version)?)
+        Ok(LogSegment::for_snapshot(storage.as_ref(), log_root, Vec::new(), version, None, None)?)
     }
 
     #[test]
