@@ -9,7 +9,7 @@ use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow::error::ArrowError;
 use chrono::{DateTime, TimeZone, Utc};
 use datafusion::catalog::memory::DataSourceExec;
-use datafusion::catalog::TableProvider;
+use datafusion::catalog::{ScanArgs, ScanResult, TableProvider};
 use datafusion::common::pruning::PruningStatistics;
 use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion::common::{Column, DFSchema, Result, Statistics, ToDFSchema};
@@ -769,24 +769,18 @@ impl TableProvider for DeltaTable {
         Ok(Arc::new(scan))
     }
 
-    async fn scan_deep(
-        &self,
-        session: &dyn Session,
-        projection: Option<&Vec<usize>>,
-        projection_deep: Option<&std::collections::HashMap<usize, Vec<String>>>,
-        filters: &[Expr],
-        limit: Option<usize>,
-    ) -> Result<Arc<dyn ExecutionPlan>> {
-        register_store(self.log_store(), session.runtime_env().as_ref());
-        let filter_expr = conjunction(filters.iter().cloned());
+    async fn scan_with_args<'a>(&self, state: &dyn Session, args: ScanArgs<'a>) -> Result<ScanResult> {
+        register_store(self.log_store(), state.runtime_env().as_ref());
+        let filter_expr = conjunction(args.filters().iter().cloned());
         let config = DeltaScanConfigBuilder::default()
             .with_options(self.config.options.clone())
             .build(self.snapshot()?.snapshot())?;
 
-        let scan = DeltaScanBuilder::new(self.snapshot()?.snapshot(), self.log_store(), session)
-            .with_projection(projection)
-            .with_projection_deep(projection_deep)
-            .with_limit(limit)
+        let projection = args.projection().map(|p| p.to_vec());
+        let scan = DeltaScanBuilder::new(self.snapshot()?.snapshot(), self.log_store(), state)
+            .with_projection(projection.as_ref())
+            .with_projection_deep(args.projection_deep())
+            .with_limit(args.limit())
             .with_filter(filter_expr)
             .with_scan_config(config)
             .build()
