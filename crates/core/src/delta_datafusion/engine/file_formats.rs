@@ -5,18 +5,24 @@ use datafusion::execution::{
     object_store::{ObjectStoreRegistry, ObjectStoreUrl},
     TaskContext,
 };
+use datafusion::prelude::*;
+use delta_kernel::engine::arrow_conversion::TryIntoArrow;
+use delta_kernel::engine::arrow_data::ArrowEngineData;
 use delta_kernel::engine::parse_json as arrow_parse_json;
 use delta_kernel::{
     engine::default::{
         executor::tokio::{TokioBackgroundExecutor, TokioMultiThreadExecutor},
         json::DefaultJsonHandler,
         parquet::DefaultParquetHandler,
+        stream_future_to_iter,
     },
     error::DeltaResult as KernelResult,
     schema::SchemaRef,
     EngineData, FileDataReadResultIterator, FileMeta, FilteredEngineData, JsonHandler,
     ParquetHandler, PredicateRef,
 };
+use futures::stream::BoxStream;
+use futures::StreamExt;
 use itertools::Itertools;
 use tokio::runtime::{Handle, RuntimeFlavor};
 
@@ -174,4 +180,190 @@ impl JsonHandler for DataFusionFileFormatHandler {
         self.get_or_create_json(path.as_object_store_url())?
             .write_json_file(path, data, overwrite)
     }
+}
+
+// ============================================================================
+// V2 Implementation using DataFusion for distributed execution
+// ============================================================================
+
+/// V2 Parquet handler that uses DataFusion's execution engine
+#[derive(Clone)]
+pub struct DataFusionFileFormatHandlerV2 {
+    ctx: Arc<TaskContext>,
+    handle: Handle,
+}
+
+impl DataFusionFileFormatHandlerV2 {
+    pub fn new(ctx: Arc<TaskContext>, handle: Handle) -> Self {
+        Self { ctx, handle }
+    }
+}
+
+impl ParquetHandler for DataFusionFileFormatHandlerV2 {
+    fn read_parquet_files(
+        &self,
+        files: &[FileMeta],
+        physical_schema: SchemaRef,
+        predicate: Option<PredicateRef>,
+    ) -> KernelResult<FileDataReadResultIterator> {
+        println!(
+            "DataFusionParquetHandlerV2::read_parquet_files called with {} files",
+            files.len()
+        );
+
+        println!("read_parquet_files FILES: {files:#?}");
+        // println!("read_parquet_files SCHEMA: {physical_schema:#?}");
+        println!("read_parquet_files PREDICATE: {predicate:#?}");
+
+        // Create the async future
+        let future = read_files_with_datafusion(
+            self.ctx.clone(),
+            files.to_vec(),
+            FileFormat::Parquet,
+            physical_schema,
+            predicate,
+        );
+
+        // Convert async stream to sync iterator using delta-kernel-rs utility
+        match self.handle.runtime_flavor() {
+            RuntimeFlavor::MultiThread => stream_future_to_iter(
+                Arc::new(TokioMultiThreadExecutor::new(self.handle.clone())),
+                future,
+            ),
+            RuntimeFlavor::CurrentThread => {
+                stream_future_to_iter(Arc::new(TokioBackgroundExecutor::new()), future)
+            }
+            _ => panic!("unsupported runtime flavor"),
+        }
+    }
+}
+
+impl JsonHandler for DataFusionFileFormatHandlerV2 {
+    fn parse_json(
+        &self,
+        json_strings: Box<dyn EngineData>,
+        output_schema: SchemaRef,
+    ) -> KernelResult<Box<dyn EngineData>> {
+        arrow_parse_json(json_strings, output_schema)
+    }
+
+    fn read_json_files(
+        &self,
+        files: &[FileMeta],
+        physical_schema: SchemaRef,
+        predicate: Option<PredicateRef>,
+    ) -> KernelResult<FileDataReadResultIterator> {
+        println!(
+            "DataFusionParquetHandlerV2::read_json_files called with {} files",
+            files.len()
+        );
+
+        println!("read_json_files FILES: {files:#?}");
+        // println!("read_json_files SCHEMA: {physical_schema:#?}");
+        println!("read_json_files PREDICATE: {predicate:#?}");
+
+        // Create the async future
+        let future = read_files_with_datafusion(
+            self.ctx.clone(),
+            files.to_vec(),
+            FileFormat::Json,
+            physical_schema,
+            predicate,
+        );
+
+        // Convert async stream to sync iterator using delta-kernel-rs utility
+        match self.handle.runtime_flavor() {
+            RuntimeFlavor::MultiThread => stream_future_to_iter(
+                Arc::new(TokioMultiThreadExecutor::new(self.handle.clone())),
+                future,
+            ),
+            RuntimeFlavor::CurrentThread => {
+                stream_future_to_iter(Arc::new(TokioBackgroundExecutor::new()), future)
+            }
+            _ => panic!("unsupported runtime flavor"),
+        }
+    }
+
+    fn write_json_file(
+        &self,
+        _path: &url::Url,
+        _data: Box<dyn Iterator<Item = KernelResult<FilteredEngineData>> + Send + '_>,
+        _overwrite: bool,
+    ) -> KernelResult<()> {
+        todo!()
+    }
+}
+
+enum FileFormat {
+    Parquet,
+    Json,
+}
+
+/// Async function to read json files using DataFusion's SessionContext
+async fn read_files_with_datafusion(
+    task_ctx: Arc<TaskContext>,
+    files: Vec<FileMeta>,
+    file_format: FileFormat,
+    physical_schema: SchemaRef,
+    _predicate: Option<PredicateRef>, // TODO: implement predicate pushdown in milestone 2
+) -> KernelResult<BoxStream<'static, KernelResult<Box<dyn EngineData>>>> {
+    use delta_kernel::engine::arrow_conversion::TryIntoArrow;
+
+    // Convert kernel schema to Arrow schema
+    let schema = TryIntoArrow::<arrow_schema::Schema>::try_into_arrow(physical_schema.as_ref())
+        .map_err(delta_kernel::Error::generic_err)?;
+
+    // Create a SessionContext - we'll use the runtime from TaskContext
+    let session_ctx =
+        SessionContext::new_with_config_rt(SessionConfig::new(), task_ctx.runtime_env().clone());
+
+    // Get object store URL from first file (assuming single object store for milestone 1)
+    if files.is_empty() {
+        return Ok(Box::pin(futures::stream::empty()));
+    }
+
+    // Convert FileMeta to file paths
+    let file_paths: Vec<String> = files.iter().map(|f| f.location.to_string()).collect();
+
+    let df = match file_format {
+        FileFormat::Parquet => {
+            let options = ParquetReadOptions::default().schema(&schema);
+            session_ctx
+                .read_parquet(file_paths, options)
+                .await
+                .map_err(|e| {
+                    delta_kernel::Error::generic(format!("DataFusion read_parquet error: {}", e))
+                })?
+        }
+        FileFormat::Json => {
+            let options = NdJsonReadOptions::default().schema(&schema);
+            session_ctx
+                .read_json(file_paths, options)
+                .await
+                .map_err(|e| {
+                    delta_kernel::Error::generic(format!("DataFusion read_json error: {}", e))
+                })?
+        }
+    };
+
+    // println!(
+    //     "Physical plan: {:#?}",
+    //     df.clone().create_physical_plan().await.map_err(|e| {
+    //         delta_kernel::Error::generic(format!("DataFusion create plan error: {}", e))
+    //     })?
+    // );
+
+    // Execute and get stream
+    let stream = df.execute_stream().await.map_err(|e| {
+        delta_kernel::Error::generic(format!("DataFusion execute_stream error: {}", e))
+    })?;
+
+    // Convert RecordBatch stream to EngineData stream
+    let engine_data_stream = stream.map(|batch_result| {
+        batch_result
+            .map_err(|e| delta_kernel::Error::generic(format!("DataFusion stream error: {}", e)))
+            .map(|batch| Box::new(ArrowEngineData::new(batch)) as Box<dyn EngineData>)
+    });
+
+    Ok(Box::pin(engine_data_stream))
 }

@@ -129,6 +129,14 @@ impl Snapshot {
         })
     }
 
+    fn engine(log_store: &dyn LogStore, config: &DeltaTableConfig) -> Arc<dyn Engine> {
+        if let Some(engine) = config.external_engine.clone() {
+            engine
+        } else {
+            log_store.engine(None)
+        }
+    }
+
     /// Create a new [`Snapshot`] instance
     pub async fn try_new(
         log_store: &dyn LogStore,
@@ -136,7 +144,7 @@ impl Snapshot {
         version: Option<i64>,
     ) -> DeltaResult<Self> {
         // TODO: bundle operation_id with logstore ...
-        let engine = log_store.engine(None);
+        let engine = Self::engine(log_store, &config);
 
         // NB: kernel engine uses Url::join to construct paths,
         // if the path does not end with a slash, the would override the entire path.
@@ -268,7 +276,7 @@ impl Snapshot {
         };
 
         // TODO: bundle operation id with log store ...
-        let engine = log_store.engine(None);
+        let engine = Self::engine(log_store, &self.config);
         let stream = scan
             .scan_metadata(engine)
             .map(|d| Ok(kernel_to_arrow(d?)?.scan_files));
@@ -532,6 +540,7 @@ impl EagerSnapshot {
 
     pub fn files(&self) -> DeltaResult<&[RecordBatch]> {
         if self.snapshot.config.require_files {
+            // let _ = print_batches(self.files.as_ref())?;
             Ok(&self.files)
         } else {
             Err(DeltaTableError::NotInitializedWithFiles("files".into()))

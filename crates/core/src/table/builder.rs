@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use chrono::{DateTime, FixedOffset, Utc};
+use delta_kernel::Engine;
 use deltalake_derive::DeltaConfig;
 use object_store::DynObjectStore;
 use serde::{Deserialize, Serialize};
@@ -62,6 +63,10 @@ pub struct DeltaTableConfig {
 
     #[delta(skip)]
     pub log_size_limiter: Option<LogSizeLimiter>,
+
+    #[serde(skip_serializing, skip_deserializing)]
+    #[delta(skip)]
+    pub external_engine: Option<Arc<dyn Engine>>,
 }
 
 impl Default for DeltaTableConfig {
@@ -73,6 +78,7 @@ impl Default for DeltaTableConfig {
             options: HashMap::new(),
             io_runtime: None,
             log_size_limiter: None,
+            external_engine: None,
         }
     }
 }
@@ -148,6 +154,11 @@ impl DeltaTableBuilder {
     /// Sets `log_size_limiter` to the builder
     pub fn with_log_size_limiter(mut self, limiter: LogSizeLimiter) -> Self {
         self.table_config.log_size_limiter = Some(limiter);
+        self
+    }
+
+    pub fn with_external_engine(mut self, engine: Arc<dyn Engine>) -> Self {
+        self.table_config.external_engine = Some(engine);
         self
     }
 
