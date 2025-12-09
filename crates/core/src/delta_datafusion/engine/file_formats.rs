@@ -1,5 +1,5 @@
-use std::sync::Arc;
-
+use super::storage::{group_by_store, AsObjectStoreUrl};
+use crate::delta_datafusion::engine::predicate_conversion::predicate_to_datafusion_expr;
 use dashmap::{mapref::one::Ref, DashMap};
 use datafusion::execution::{
     object_store::{ObjectStoreRegistry, ObjectStoreUrl},
@@ -24,9 +24,8 @@ use delta_kernel::{
 use futures::stream::BoxStream;
 use futures::StreamExt;
 use itertools::Itertools;
+use std::sync::Arc;
 use tokio::runtime::{Handle, RuntimeFlavor};
-
-use super::storage::{group_by_store, AsObjectStoreUrl};
 
 #[derive(Clone)]
 pub struct DataFusionFileFormatHandler {
@@ -305,8 +304,12 @@ async fn read_files_with_datafusion(
     files: Vec<FileMeta>,
     file_format: FileFormat,
     physical_schema: SchemaRef,
-    _predicate: Option<PredicateRef>, // TODO: implement predicate pushdown in milestone 2
+    predicate: Option<PredicateRef>,
 ) -> KernelResult<BoxStream<'static, KernelResult<Box<dyn EngineData>>>> {
+    if files.is_empty() {
+        return Ok(Box::pin(futures::stream::empty()));
+    }
+
     use delta_kernel::engine::arrow_conversion::TryIntoArrow;
 
     // Convert kernel schema to Arrow schema
@@ -318,10 +321,6 @@ async fn read_files_with_datafusion(
         SessionContext::new_with_config_rt(SessionConfig::new(), task_ctx.runtime_env().clone());
 
     // Get object store URL from first file (assuming single object store for milestone 1)
-    if files.is_empty() {
-        return Ok(Box::pin(futures::stream::empty()));
-    }
-
     // Convert FileMeta to file paths
     let file_paths: Vec<String> = files.iter().map(|f| f.location.to_string()).collect();
 
@@ -346,6 +345,18 @@ async fn read_files_with_datafusion(
         }
     };
 
+    let df = if let Some(predicate) = predicate {
+        let predicate_expr = predicate_to_datafusion_expr(predicate.as_ref()).map_err(|e| {
+            delta_kernel::Error::generic(format!("DataFusion predicate error: {}", e))
+        })?;
+
+        println!("DF PREDICATE: {predicate_expr:#?}");
+        df.filter(predicate_expr)
+            .map_err(|e| delta_kernel::Error::generic(format!("DataFusion filter error: {}", e)))?
+    } else {
+        df
+    };
+
     // println!(
     //     "Physical plan: {:#?}",
     //     df.clone().create_physical_plan().await.map_err(|e| {
@@ -362,7 +373,10 @@ async fn read_files_with_datafusion(
     let engine_data_stream = stream.map(|batch_result| {
         batch_result
             .map_err(|e| delta_kernel::Error::generic(format!("DataFusion stream error: {}", e)))
-            .map(|batch| Box::new(ArrowEngineData::new(batch)) as Box<dyn EngineData>)
+            .map(|batch| {
+                // let _ = print_batches(&[batch.clone()]).unwrap();
+                Box::new(ArrowEngineData::new(batch)) as Box<dyn EngineData>
+            })
     });
 
     Ok(Box::pin(engine_data_stream))

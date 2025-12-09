@@ -10,6 +10,7 @@ use tokio::runtime::Handle;
 
 mod file_formats;
 mod storage;
+mod predicate_conversion;
 
 /// A Datafusion based Kernel Engine
 #[derive(Clone)]
