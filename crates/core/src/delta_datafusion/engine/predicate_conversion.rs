@@ -1,9 +1,10 @@
 //! Conversion from delta-kernel predicates to DataFusion expressions for predicate pushdown.
 
 use crate::errors::{DeltaResult, DeltaTableError};
+use crate::kernel::schema::partitions::{PartitionFilter, PartitionValue};
 use datafusion::common::Column;
 use datafusion::logical_expr::{binary_expr, col, lit, Expr, Operator};
-use datafusion::prelude::get_field;
+use datafusion::prelude::{array_element, get_field, in_list, map_extract};
 use delta_kernel::expressions::{
     BinaryPredicateOp, Expression, JunctionPredicateOp, Predicate, Scalar, UnaryPredicateOp,
 };
@@ -174,10 +175,97 @@ fn scalar_to_datafusion_lit(scalar: &Scalar) -> DeltaResult<Expr> {
     }
 }
 
+/// Extract a partition value from the `add.partitionValues` map structure.
+///
+/// This creates an expression that accesses `add.partitionValues[partition_key]`.
+///
+/// # Arguments
+/// * `partition_key` - The partition column name to extract from the map
+///
+/// # Returns
+/// A DataFusion expression that extracts the value: `map_extract(add.partitionValues, 'partition_key')`
+pub fn extract_partition_value(partition_key: &str) -> Expr {
+    // Build the expression: add.partitionValues[partition_key]
+    // This is equivalent to: map_extract(get_field(col("add"), "partitionValues"), partition_key)
+    let add_col = col("add");
+    let partition_values_map = get_field(add_col, "partitionValues");
+
+    // map_extract returns a list, so we need to extract the first element
+    array_element(
+        map_extract(partition_values_map, lit(partition_key)),
+        lit(1),
+    )
+}
+
+/// Convert a PartitionFilter to a DataFusion Expr for predicate pushdown.
+///
+/// This function supports all PartitionFilter operations:
+/// - Equal, NotEqual
+/// - LessThan, LessThanOrEqual, GreaterThan, GreaterThanOrEqual
+/// - In, NotIn
+///
+/// Note: PartitionFilter values are always strings, so they are converted to string literals.
+pub fn partition_filter_to_datafusion_expr(filter: &PartitionFilter) -> DeltaResult<Expr> {
+    let column = extract_partition_value(&filter.key);
+
+    match &filter.value {
+        PartitionValue::Equal(value) => {
+            // Handle NULL_PARTITION_VALUE_DATA_PATH as IS NULL
+            if value == crate::kernel::schema::partitions::NULL_PARTITION_VALUE_DATA_PATH {
+                Ok(column.is_null())
+            } else {
+                Ok(binary_expr(column, Operator::Eq, lit(value.clone())))
+            }
+        }
+        PartitionValue::NotEqual(value) => {
+            // Handle NULL_PARTITION_VALUE_DATA_PATH as IS NOT NULL
+            if value == crate::kernel::schema::partitions::NULL_PARTITION_VALUE_DATA_PATH {
+                Ok(column.is_not_null())
+            } else {
+                Ok(binary_expr(column, Operator::NotEq, lit(value.clone())))
+            }
+        }
+        PartitionValue::LessThan(value) => {
+            Ok(binary_expr(column, Operator::Lt, lit(value.clone())))
+        }
+        PartitionValue::LessThanOrEqual(value) => {
+            Ok(binary_expr(column, Operator::LtEq, lit(value.clone())))
+        }
+        PartitionValue::GreaterThan(value) => {
+            Ok(binary_expr(column, Operator::Gt, lit(value.clone())))
+        }
+        PartitionValue::GreaterThanOrEqual(value) => {
+            Ok(binary_expr(column, Operator::GtEq, lit(value.clone())))
+        }
+        PartitionValue::In(values) => {
+            let lit_values: Vec<Expr> = values.iter().map(|v| lit(v.clone())).collect();
+            Ok(in_list(column, lit_values, false))
+        }
+        PartitionValue::NotIn(values) => {
+            let lit_values: Vec<Expr> = values.iter().map(|v| lit(v.clone())).collect();
+            Ok(in_list(column, lit_values, true)) // true = negated
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use delta_kernel::expressions::Expression as KernelExpr;
+
+    #[test]
+    fn test_extract_partition_value() {
+        // Test extracting a partition value from add.partitionValues map
+        let expr = extract_partition_value("date");
+
+        // Expected: array_element(map_extract(get_field(col("add"), "partitionValues"), "date"), 1)
+        let expected = array_element(
+            map_extract(get_field(col("add"), "partitionValues"), lit("date")),
+            lit(1),
+        );
+
+        assert_eq!(expr, expected);
+    }
 
     #[test]
     fn test_simple_equality() {
@@ -343,5 +431,137 @@ mod tests {
             let expected = binary_expr(col("col"), Operator::Eq, expected_lit);
             assert_eq!(df_expr, expected);
         }
+    }
+
+    // PartitionFilter conversion tests
+    #[test]
+    fn test_partition_filter_equal() {
+        let filter = PartitionFilter {
+            key: "date".to_string(),
+            value: PartitionValue::Equal("2023-01-01".to_string()),
+        };
+        let df_expr = partition_filter_to_datafusion_expr(&filter).unwrap();
+        let expected = binary_expr(
+            extract_partition_value("date"),
+            Operator::Eq,
+            lit("2023-01-01"),
+        );
+        assert_eq!(df_expr, expected);
+    }
+
+    #[test]
+    fn test_partition_filter_not_equal() {
+        let filter = PartitionFilter {
+            key: "region".to_string(),
+            value: PartitionValue::NotEqual("us-west".to_string()),
+        };
+        let df_expr = partition_filter_to_datafusion_expr(&filter).unwrap();
+        let expected = binary_expr(
+            extract_partition_value("region"),
+            Operator::NotEq,
+            lit("us-west"),
+        );
+        assert_eq!(df_expr, expected);
+    }
+
+    #[test]
+    fn test_partition_filter_less_than() {
+        let filter = PartitionFilter {
+            key: "year".to_string(),
+            value: PartitionValue::LessThan("2023".to_string()),
+        };
+        let df_expr = partition_filter_to_datafusion_expr(&filter).unwrap();
+        let expected = binary_expr(extract_partition_value("year"), Operator::Lt, lit("2023"));
+        assert_eq!(df_expr, expected);
+    }
+
+    #[test]
+    fn test_partition_filter_less_than_or_equal() {
+        let filter = PartitionFilter {
+            key: "month".to_string(),
+            value: PartitionValue::LessThanOrEqual("06".to_string()),
+        };
+        let df_expr = partition_filter_to_datafusion_expr(&filter).unwrap();
+        let expected = binary_expr(extract_partition_value("month"), Operator::LtEq, lit("06"));
+        assert_eq!(df_expr, expected);
+    }
+
+    #[test]
+    fn test_partition_filter_greater_than() {
+        let filter = PartitionFilter {
+            key: "day".to_string(),
+            value: PartitionValue::GreaterThan("15".to_string()),
+        };
+        let df_expr = partition_filter_to_datafusion_expr(&filter).unwrap();
+        let expected = binary_expr(extract_partition_value("day"), Operator::Gt, lit("15"));
+        assert_eq!(df_expr, expected);
+    }
+
+    #[test]
+    fn test_partition_filter_greater_than_or_equal() {
+        let filter = PartitionFilter {
+            key: "hour".to_string(),
+            value: PartitionValue::GreaterThanOrEqual("12".to_string()),
+        };
+        let df_expr = partition_filter_to_datafusion_expr(&filter).unwrap();
+        let expected = binary_expr(extract_partition_value("hour"), Operator::GtEq, lit("12"));
+        assert_eq!(df_expr, expected);
+    }
+
+    #[test]
+    fn test_partition_filter_in() {
+        let filter = PartitionFilter {
+            key: "status".to_string(),
+            value: PartitionValue::In(vec![
+                "active".to_string(),
+                "pending".to_string(),
+                "processing".to_string(),
+            ]),
+        };
+        let df_expr = partition_filter_to_datafusion_expr(&filter).unwrap();
+        let expected = in_list(
+            extract_partition_value("status"),
+            vec![lit("active"), lit("pending"), lit("processing")],
+            false,
+        );
+        assert_eq!(df_expr, expected);
+    }
+
+    #[test]
+    fn test_partition_filter_not_in() {
+        let filter = PartitionFilter {
+            key: "country".to_string(),
+            value: PartitionValue::NotIn(vec!["US".to_string(), "CA".to_string()]),
+        };
+        let df_expr = partition_filter_to_datafusion_expr(&filter).unwrap();
+        let expected = in_list(
+            extract_partition_value("country"),
+            vec![lit("US"), lit("CA")],
+            true,
+        );
+        assert_eq!(df_expr, expected);
+    }
+
+    #[test]
+    fn test_partition_filter_null_value() {
+        use crate::kernel::schema::partitions::NULL_PARTITION_VALUE_DATA_PATH;
+
+        // Equal to NULL should become IS NULL
+        let filter = PartitionFilter {
+            key: "optional_field".to_string(),
+            value: PartitionValue::Equal(NULL_PARTITION_VALUE_DATA_PATH.to_string()),
+        };
+        let df_expr = partition_filter_to_datafusion_expr(&filter).unwrap();
+        let expected = extract_partition_value("optional_field").is_null();
+        assert_eq!(df_expr, expected);
+
+        // NotEqual to NULL should become IS NOT NULL
+        let filter = PartitionFilter {
+            key: "optional_field".to_string(),
+            value: PartitionValue::NotEqual(NULL_PARTITION_VALUE_DATA_PATH.to_string()),
+        };
+        let df_expr = partition_filter_to_datafusion_expr(&filter).unwrap();
+        let expected = extract_partition_value("optional_field").is_not_null();
+        assert_eq!(df_expr, expected);
     }
 }

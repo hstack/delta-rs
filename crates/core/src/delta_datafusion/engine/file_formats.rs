@@ -1,5 +1,8 @@
 use super::storage::{group_by_store, AsObjectStoreUrl};
-use crate::delta_datafusion::engine::predicate_conversion::predicate_to_datafusion_expr;
+use crate::delta_datafusion::engine::predicate_conversion::{
+    partition_filter_to_datafusion_expr, predicate_to_datafusion_expr,
+};
+use crate::PartitionFilter;
 use dashmap::{mapref::one::Ref, DashMap};
 use datafusion::execution::{
     object_store::{ObjectStoreRegistry, ObjectStoreUrl},
@@ -190,11 +193,20 @@ impl JsonHandler for DataFusionFileFormatHandler {
 pub struct DataFusionFileFormatHandlerV2 {
     ctx: Arc<TaskContext>,
     handle: Handle,
+    partition_filter: Option<PartitionFilter>,
 }
 
 impl DataFusionFileFormatHandlerV2 {
-    pub fn new(ctx: Arc<TaskContext>, handle: Handle) -> Self {
-        Self { ctx, handle }
+    pub fn new(
+        ctx: Arc<TaskContext>,
+        handle: Handle,
+        partition_filter: Option<PartitionFilter>,
+    ) -> Self {
+        Self {
+            ctx,
+            handle,
+            partition_filter,
+        }
     }
 }
 
@@ -221,6 +233,7 @@ impl ParquetHandler for DataFusionFileFormatHandlerV2 {
             FileFormat::Parquet,
             physical_schema,
             predicate,
+            self.partition_filter.clone(),
         );
 
         // Convert async stream to sync iterator using delta-kernel-rs utility
@@ -268,6 +281,7 @@ impl JsonHandler for DataFusionFileFormatHandlerV2 {
             FileFormat::Json,
             physical_schema,
             predicate,
+            self.partition_filter.clone(),
         );
 
         // Convert async stream to sync iterator using delta-kernel-rs utility
@@ -305,6 +319,7 @@ async fn read_files_with_datafusion(
     file_format: FileFormat,
     physical_schema: SchemaRef,
     predicate: Option<PredicateRef>,
+    partition_filter: Option<PartitionFilter>,
 ) -> KernelResult<BoxStream<'static, KernelResult<Box<dyn EngineData>>>> {
     if files.is_empty() {
         return Ok(Box::pin(futures::stream::empty()));
@@ -317,8 +332,10 @@ async fn read_files_with_datafusion(
         .map_err(delta_kernel::Error::generic_err)?;
 
     // Create a SessionContext - we'll use the runtime from TaskContext
-    let session_ctx =
-        SessionContext::new_with_config_rt(SessionConfig::new(), task_ctx.runtime_env().clone());
+    let config = SessionConfig::new();
+    // config = config.set_bool("datafusion.sql_parser.enable_ident_normalization", false);
+
+    let session_ctx = SessionContext::new_with_config_rt(config, task_ctx.runtime_env().clone());
 
     // Get object store URL from first file (assuming single object store for milestone 1)
     // Convert FileMeta to file paths
@@ -336,6 +353,8 @@ async fn read_files_with_datafusion(
         }
         FileFormat::Json => {
             let options = NdJsonReadOptions::default().schema(&schema);
+
+            // FIXME: sort by add.modificationTime DESC
             session_ctx
                 .read_json(file_paths, options)
                 .await
@@ -350,7 +369,23 @@ async fn read_files_with_datafusion(
             delta_kernel::Error::generic(format!("DataFusion predicate error: {}", e))
         })?;
 
-        println!("DF PREDICATE: {predicate_expr:#?}");
+        // println!("DF PREDICATE: {predicate_expr:#?}");
+        df.filter(predicate_expr)
+            .map_err(|e| delta_kernel::Error::generic(format!("DataFusion filter error: {}", e)))?
+    } else {
+        df
+    };
+
+    // TODO: better schema check
+    let df = if let (Some(pf), Ok(_)) = (partition_filter, schema.field_with_name("add")) {
+        // FIXME don't apply partition pruning to removed files
+        let predicate_expr = partition_filter_to_datafusion_expr(&pf).map_err(|e| {
+            delta_kernel::Error::generic(format!("DataFusion partition filter error: {}", e))
+        })?;
+
+        println!("PARTITION FILTER: {pf:#?}");
+        // println!("PREDICATE_EXPR: {predicate_expr:#?}");
+
         df.filter(predicate_expr)
             .map_err(|e| delta_kernel::Error::generic(format!("DataFusion filter error: {}", e)))?
     } else {
