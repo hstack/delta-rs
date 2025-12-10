@@ -117,6 +117,10 @@ impl ParquetHandler for DataFusionFileFormatHandler {
         physical_schema: SchemaRef,
         predicate: Option<PredicateRef>,
     ) -> KernelResult<FileDataReadResultIterator> {
+        println!("read_parquet_files FILES: {files:#?}");
+        // println!("read_parquet_files SCHEMA: {physical_schema:#?}");
+        println!("read_parquet_files PREDICATE: {predicate:#?}");
+
         let grouped_files = group_by_store(files.to_vec());
         Ok(Box::new(
             grouped_files
@@ -153,6 +157,10 @@ impl JsonHandler for DataFusionFileFormatHandler {
         physical_schema: SchemaRef,
         predicate: Option<PredicateRef>,
     ) -> KernelResult<FileDataReadResultIterator> {
+        println!("read_json_files FILES: {files:#?}");
+        // println!("read_json_files SCHEMA: {physical_schema:#?}");
+        println!("read_json_files PREDICATE: {predicate:#?}");
+
         let grouped_files = group_by_store(files.to_vec());
         Ok(Box::new(
             grouped_files
