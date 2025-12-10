@@ -11,7 +11,7 @@ use tokio::runtime::Handle;
 
 mod file_formats;
 mod predicate_conversion;
-mod storage;
+pub mod storage;
 
 /// A Datafusion based Kernel Engine
 #[derive(Clone)]
