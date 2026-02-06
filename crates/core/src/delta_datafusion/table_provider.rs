@@ -8,7 +8,7 @@ use arrow::compute::filter_record_batch;
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow::error::ArrowError;
 use chrono::{DateTime, TimeZone, Utc};
-use datafusion::catalog::TableProvider;
+use datafusion::catalog::{ScanArgs, ScanResult, TableProvider};
 use datafusion::catalog::memory::DataSourceExec;
 use datafusion::common::pruning::PruningStatistics;
 use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
@@ -261,6 +261,7 @@ pub(crate) struct DeltaScanBuilder<'a> {
     filter: Option<Expr>,
     session: &'a dyn Session,
     projection: Option<&'a Vec<usize>>,
+    projection_deep: Option<&'a std::collections::HashMap<usize, Vec<String>>>,
     limit: Option<usize>,
     files: Option<&'a [Add]>,
     config: Option<DeltaScanConfig>,
@@ -278,6 +279,7 @@ impl<'a> DeltaScanBuilder<'a> {
             filter: None,
             session,
             projection: None,
+            projection_deep: None,
             limit: None,
             files: None,
             config: None,
@@ -296,6 +298,14 @@ impl<'a> DeltaScanBuilder<'a> {
 
     pub fn with_projection(mut self, projection: Option<&'a Vec<usize>>) -> Self {
         self.projection = projection;
+        self
+    }
+
+    pub fn with_projection_deep(
+            mut self,
+            projection_deep: Option<&'a std::collections::HashMap<usize, Vec<String>>>,
+    ) -> Self {
+        self.projection_deep = projection_deep;
         self
     }
 
@@ -636,7 +646,8 @@ impl<'a> DeltaScanBuilder<'a> {
                     },
                 )
                 .with_statistics(stats)
-                .with_projection_indices(self.projection.cloned())?
+                // .with_projection_indices(self.projection.cloned())?
+                .with_deep_projection(self.projection.cloned(), self.projection_deep.cloned())?
                 .with_limit(self.limit)
                 .build();
 
@@ -928,6 +939,26 @@ impl TableProvider for DeltaTableProvider {
         }
         Ok(Arc::new(scan.build().await?))
     }
+
+    async fn scan_with_args<'a>(&self, state: &dyn Session, args: ScanArgs<'a>) -> Result<ScanResult> {
+        state.ensure_log_store_registered(self.log_store.as_ref())?;
+        let filters = args.filters().unwrap_or(&[]);
+        let filter_expr = conjunction(filters.iter().cloned());
+
+        let projection = args.projection().map(|p| p.to_vec());
+        let mut scan = DeltaScanBuilder::new(&self.snapshot, self.log_store.clone(), state)
+            .with_projection(projection.as_ref())
+            .with_projection_deep(args.projection_deep())
+            .with_limit(args.limit())
+            .with_filter(filter_expr)
+            .with_scan_config(self.config.clone());
+
+        if let Some(files) = &self.files {
+            scan = scan.with_files(files);
+        }
+        Ok(ScanResult::new(Arc::new(scan.build().await?)))
+    }
+
 
     fn supports_filters_pushdown(
         &self,

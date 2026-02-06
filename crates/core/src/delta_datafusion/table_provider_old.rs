@@ -2,7 +2,7 @@ use std::any::Any;
 use std::borrow::Cow;
 use std::sync::Arc;
 use arrow_schema::Schema;
-use datafusion::catalog::{Session, TableProvider};
+use datafusion::catalog::{ScanArgs, ScanResult, Session, TableProvider};
 use datafusion::common::{Result, Statistics};
 use datafusion::datasource::TableType;
 use datafusion::execution::runtime_env::RuntimeEnv;
@@ -83,47 +83,17 @@ impl TableProvider for DeltaTableOldProvider {
 
     async fn scan(
         &self,
-        session: &dyn Session,
-        projection: Option<&Vec<usize>>,
-        filters: &[Expr],
-        limit: Option<usize>,
+        _session: &dyn Session,
+        _projection: Option<&Vec<usize>>,
+        _filters: &[Expr],
+        _limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        register_store(self.log_store(), session.runtime_env().as_ref());
-        let filter_expr = conjunction(filters.iter().cloned());
-
-        let config = DeltaScanConfigBuilder {
-            include_file_column: false,
-            file_column_name: None,
-            wrap_partition_values: None,
-            enable_parquet_pushdown: true,
-            schema: None,
-            options: std::collections::HashMap::new(),
-        };
-
-        let config = config
-            .with_options(self.config.options.clone())
-            .build(self.snapshot()?.snapshot())?;
-
-        let scan = DeltaScanBuilder::new(self.snapshot()?.snapshot(), self.log_store(), session)
-            .with_projection(projection)
-            .with_limit(limit)
-            .with_filter(filter_expr)
-            .with_scan_config(config)
-            .build()
-            .await?;
-
-        Ok(Arc::new(scan))
+        unimplemented!("scan is not available for this table provider; use scan_with_args")
     }
 
-    async fn scan_deep(
-        &self,
-        session: &dyn Session,
-        projection: Option<&Vec<usize>>,
-        projection_deep: Option<&std::collections::HashMap<usize, Vec<String>>>,
-        filters: &[Expr],
-        limit: Option<usize>,
-    ) -> Result<Arc<dyn ExecutionPlan>> {
-        register_store(self.log_store(), session.runtime_env().as_ref());
+    async fn scan_with_args<'a>(&self, state: &dyn Session, args: ScanArgs<'a>) -> Result<ScanResult> {
+        register_store(self.log_store(), state.runtime_env().as_ref());
+        let filters = args.filters().unwrap_or(&[]);
         let filter_expr = conjunction(filters.iter().cloned());
 
         let config = DeltaScanConfigBuilder {
@@ -139,16 +109,17 @@ impl TableProvider for DeltaTableOldProvider {
             .with_options(self.config.options.clone())
             .build(self.snapshot()?.snapshot())?;
 
-        let scan = DeltaScanBuilder::new(self.snapshot()?.snapshot(), self.log_store(), session)
-            .with_projection(projection)
-            .with_projection_deep(projection_deep)
-            .with_limit(limit)
+        let projection = args.projection().map(|p| p.to_vec());
+        let scan = DeltaScanBuilder::new(self.snapshot()?.snapshot(), self.log_store(), state)
+            .with_projection(projection.as_ref())
+            .with_projection_deep(args.projection_deep())
+            .with_limit(args.limit())
             .with_filter(filter_expr)
             .with_scan_config(config)
             .build()
             .await?;
 
-        Ok(Arc::new(scan))
+        Ok(ScanResult::new(Arc::new(scan)))
     }
     
     fn supports_filters_pushdown(
