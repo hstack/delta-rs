@@ -155,3 +155,40 @@ inherits = "release"
 opt-level = 3
 codegen-units = 1
 lto = "thin"
+
+
+[patch.crates-io]
+datafusion = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-52' }
+datafusion-catalog = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-52' }
+datafusion-catalog-listing = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-52' }
+datafusion-common = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-52' }
+datafusion-common-runtime = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-52' }
+datafusion-datasource = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-52' }
+datafusion-datasource-avro = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-52' }
+datafusion-datasource-csv = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-52' }
+datafusion-datasource-json = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-52' }
+datafusion-datasource-parquet = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-52' }
+datafusion-execution = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-52' }
+datafusion-expr = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-52' }
+datafusion-expr-common = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-52' }
+datafusion-ffi = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-52' }
+datafusion-functions = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-52' }
+datafusion-functions-aggregate = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-52' }
+datafusion-functions-aggregate-common = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-52' }
+datafusion-functions-nested = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-52' }
+datafusion-functions-table = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-52' }
+datafusion-functions-window = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-52' }
+datafusion-functions-window-common = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-52' }
+datafusion-optimizer = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-52' }
+datafusion-physical-expr = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-52' }
+datafusion-physical-expr-adapter = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-52' }
+datafusion-physical-expr-common = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-52' }
+datafusion-physical-optimizer = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-52' }
+datafusion-pruning = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-52' }
+datafusion-physical-plan = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-52' }
+datafusion-proto = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-52' }
+datafusion-proto-common = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-52' }
+datafusion-session = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-52' }
+datafusion-spark = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-52' }
+datafusion-sql = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-52' }
+datafusion-substrait = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-52' }
