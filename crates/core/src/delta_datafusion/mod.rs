@@ -98,6 +98,7 @@ pub use session::SessionFallbackPolicy;
 pub(crate) use session::{SessionResolveContext, resolve_session_state};
 use crate::delta_datafusion::expr_adapter::build_expr_adapter_factory;
 mod table_provider;
+pub mod udtf;
 pub(crate) mod utils;
 mod expr_adapter;
 pub mod table_provider_old;
