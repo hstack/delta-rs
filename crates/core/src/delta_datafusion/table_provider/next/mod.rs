@@ -216,6 +216,59 @@ impl TableProvider for DeltaScan {
         scan::execution_plan(&self.config, session, scan_plan, stream, engine, limit).await
     }
 
+
+    async fn scan_deep(
+        &self,
+        session: &dyn Session,
+        projection: Option<&Vec<usize>>,
+        projection_deep: Option<&std::collections::HashMap<usize, Vec<String>>>,
+        filters: &[Expr],
+        limit: Option<usize>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        let engine = DataFusionEngine::new_from_session(session);
+
+        // Filter out file_id column from projection if present
+        let file_id_idx = self
+            .config
+            .file_column_name
+            .as_ref()
+            .map(|_| self.scan_schema.fields().len());
+        let kernel_projection = projection.map(|proj| {
+            proj.iter()
+                .filter(|&&idx| Some(idx) != file_id_idx)
+                .copied()
+                .collect::<Vec<_>>()
+        });
+
+        let mut scan_plan = KernelScanPlan::try_new(
+            self.snapshot.snapshot(),
+            kernel_projection.as_ref(),
+            filters,
+            &self.config,
+            self.file_skipping_predicate.clone(),
+        )?;
+        scan_plan.result_projection_deep = projection_deep.cloned();
+
+        let stream = match &self.snapshot {
+            SnapshotWrapper::Snapshot(_) => scan_plan.scan.scan_metadata(engine.clone()),
+            SnapshotWrapper::EagerSnapshot(esn) => {
+                if let Ok(files) = esn.files() {
+                    scan_plan.scan.scan_metadata_from(
+                        engine.clone(),
+                        esn.snapshot().version() as u64,
+                        Box::new(files.to_vec().into_iter()),
+                        None,
+                    )
+                } else {
+                    scan_plan.scan.scan_metadata(engine.clone())
+                }
+            }
+        };
+
+        scan::execution_plan(&self.config, session, scan_plan, stream, engine, limit).await
+    }
+
+
     fn supports_filters_pushdown(
         &self,
         filter: &[&Expr],
