@@ -95,6 +95,7 @@ mod session;
 pub use session::SessionFallbackPolicy;
 pub(crate) use session::{SessionResolveContext, resolve_session_state};
 mod table_provider;
+pub mod udtf;
 pub(crate) mod utils;
 pub mod table_provider_old;
 
