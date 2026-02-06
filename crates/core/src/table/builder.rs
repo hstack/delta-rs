@@ -130,9 +130,10 @@ impl DeltaTableBuilder {
         })?;
 
         debug!("creating table builder with {table_url}");
+        let actual_table_url = parse_table_uri(&table_url)?;
 
         Ok(Self {
-            table_url,
+            table_url: actual_table_url,
             storage_backend: None,
             version: DeltaVersion::default(),
             storage_options: None,
@@ -278,6 +279,7 @@ impl DeltaTableBuilder {
     /// Build a delta storage backend for the given config
     pub fn build_storage(&self) -> DeltaResult<LogStoreRef> {
         debug!("build_storage() with {}", self.table_url);
+        let location = self.table_url.clone();
 
         let mut storage_config = StorageConfig::parse_options(self.storage_options())?;
         if let Some(io_runtime) = self.table_config.io_runtime.clone() {
@@ -286,14 +288,16 @@ impl DeltaTableBuilder {
 
         if let Some((store, _url)) = self.storage_backend.as_ref() {
             debug!("Loading a logstore with a custom store: {store:?}");
-            crate::logstore::logstore_with(store.clone(), &self.table_url, storage_config)
+            crate::logstore::logstore_with(store.clone(), &location, storage_config)
         } else {
             // If there has been no backend defined just default to the normal logstore look up
-            debug!(
-                "Loading a logstore based off the location: {:?}",
-                self.table_url
-            );
-            crate::logstore::logstore_for(&self.table_url, storage_config)
+            // debug!(
+            //     "Loading a logstore based off the location: {:?}",
+            //     self.table_url
+            // );
+            // crate::logstore::logstore_for(&self.table_url, storage_config)
+            debug!("Loading a logstore based off the location: {location:?}");
+            crate::logstore::logstore_for(&location, storage_config)
         }
     }
 
@@ -410,10 +414,17 @@ pub fn parse_table_uri(table_uri: impl AsRef<str>) -> DeltaResult<Url> {
 
     let mut url = match uri_type {
         UriType::LocalPath(path) => {
-            let path = std::fs::canonicalize(path).map_err(|err| {
-                let msg = format!("Invalid table location: {table_uri}\nError: {err:?}");
-                DeltaTableError::InvalidTableLocation(msg)
-            })?;
+            // Tolerate non-existent paths: callers like `DeltaTableBuilder::from_url`
+            // must work for tables that don't exist on disk yet. Existence is
+            // enforced separately by `open_table` (see `builder_from_valid_url`).
+            let path = match std::fs::canonicalize(&path) {
+                Ok(canonical) => canonical,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => path,
+                Err(err) => {
+                    let msg = format!("Invalid table location: {table_uri}\nError: {err:?}");
+                    return Err(DeltaTableError::InvalidTableLocation(msg));
+                }
+            };
             Url::from_directory_path(path).map_err(|_| {
                 let msg = format!(
                     "Could not construct a URL from the canonical path: {table_uri}.\n\
@@ -590,6 +601,13 @@ mod tests {
     }
 
     #[test]
+    fn test_invalid_uri() {
+        // Urls should round trips as-is
+        DeltaTableBuilder::from_url(Url::parse("this://is.nonsense").unwrap())
+            .expect_err("this should be an error");
+    }
+    
+    #[test]
     fn test_writer_storage_opts_url_trim() {
         let cases = [
             // Trim Case 1 - Key indicating a url
@@ -740,9 +758,12 @@ mod tests {
         );
 
         let builder = builder_result.unwrap();
-        assert_eq!(
-            builder.table_url.as_str(),
-            Url::from_directory_path(&new_path).unwrap().as_str()
-        );
+        // `from_url` normalizes the path by trimming the trailing `/` so the
+        // URL is consistent across object-store registrations (see HSTACK
+        // commit "FIX table constructor"). Compare against the trimmed form.
+        let mut expected = Url::from_directory_path(&new_path).unwrap();
+        let trimmed = expected.path().trim_end_matches('/').to_owned();
+        expected.set_path(&trimmed);
+        assert_eq!(builder.table_url.as_str(), expected.as_str());
     }
 }
