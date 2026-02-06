@@ -15,6 +15,7 @@ mod file_selection_bench_bridge;
 mod integration;
 mod integration_checkpoint;
 mod integration_datafusion;
+mod integration_datafusion_deep;
 #[cfg(feature = "nanosecond-timestamps")]
 mod nanosecond_timestamps;
 mod operation_scope;
