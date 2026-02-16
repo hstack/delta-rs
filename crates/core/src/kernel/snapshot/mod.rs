@@ -55,6 +55,7 @@ pub use self::log_data::*;
 pub use iterators::*;
 pub use scan::*;
 pub use stream::*;
+use crate::kernel::size_limits::SnapshotLoadMetrics;
 
 mod iterators;
 mod log_data;
@@ -75,6 +76,8 @@ pub struct Snapshot {
     config: DeltaTableConfig,
     /// Logical table schema
     schema: SchemaRef,
+    /// Metrics captured during snapshot loading
+    load_metrics: SnapshotLoadMetrics,
 }
 
 impl Snapshot {
@@ -106,12 +109,44 @@ impl Snapshot {
             }
         };
 
-        let snapshot = if let Some(limiter) = &config.log_size_limiter {
-            let segment = limiter.truncate(snapshot.log_segment().clone(), log_store).await?;
+        let current_version = snapshot.version() as i64;
+
+        let (snapshot, load_metrics) = if let Some(limiter) = &config.log_size_limiter {
+            let original_segment = snapshot.log_segment().clone();
+            let original_size: u64 = original_segment
+                .checkpoint_parts
+                .iter()
+                .chain(original_segment.ascending_commit_files.iter())
+                .map(|p| p.location.size)
+                .sum();
+
+            let (truncated_segment, truncation_info) = limiter.truncate(original_segment, log_store).await?;
             let table_configuration = snapshot.table_configuration().clone();
-            Arc::new(KernelSnapshot::new(segment, table_configuration))
+
+            let oldest_version = truncated_segment.ascending_commit_files
+                .first()
+                .map(|p| p.version as i64);
+
+            let metrics = if let Some(info) = truncation_info {
+                SnapshotLoadMetrics::with_truncation(
+                    current_version,
+                    oldest_version,
+                    info.truncated_size,
+                    info.original_size,
+                    info.commits_discarded,
+                )
+            } else {
+                SnapshotLoadMetrics::no_truncation(
+                    current_version,
+                    oldest_version,
+                    original_size,
+                )
+            };
+
+            (Arc::new(KernelSnapshot::new(truncated_segment, table_configuration)), metrics)
         } else {
-            snapshot
+            let metrics = SnapshotLoadMetrics::from_snapshot(&snapshot);
+            (snapshot, metrics)
         };
 
         let schema = Arc::new(
@@ -126,6 +161,7 @@ impl Snapshot {
             inner: snapshot,
             config,
             schema,
+            load_metrics,
         })
     }
 
@@ -191,10 +227,30 @@ impl Snapshot {
                 .try_into_arrow()?,
         );
 
+        // For updates, we don't track truncation metrics since we're building from existing snapshot
+        let log_segment = snapshot.log_segment();
+        let log_size: u64 = log_segment
+            .checkpoint_parts
+            .iter()
+            .chain(log_segment.ascending_commit_files.iter())
+            .map(|p| p.location.size)
+            .sum();
+
+        let oldest_version = log_segment.ascending_commit_files
+            .first()
+            .map(|p| p.version as i64);
+
+        let load_metrics = SnapshotLoadMetrics::no_truncation(
+            snapshot.version() as i64,
+            oldest_version,
+            log_size,
+        );
+
         Ok(Arc::new(Self {
             inner: snapshot,
             schema,
             config: self.config.clone(),
+            load_metrics,
         }))
     }
 
@@ -225,6 +281,11 @@ impl Snapshot {
     /// Get the table config which is loaded with of the snapshot
     pub fn load_config(&self) -> &DeltaTableConfig {
         &self.config
+    }
+
+    /// Get the metrics captured during snapshot loading
+    pub fn load_metrics(&self) -> &SnapshotLoadMetrics {
+        &self.load_metrics
     }
 
     /// Get the table root of the snapshot
@@ -677,6 +738,11 @@ impl EagerSnapshot {
         self.snapshot.load_config()
     }
 
+    /// Get the metrics captured during snapshot loading
+    pub fn load_metrics(&self) -> &SnapshotLoadMetrics {
+        self.snapshot.load_metrics()
+    }
+
     /// Well known table configuration
     pub fn table_properties(&self) -> &TableProperties {
         self.snapshot.table_properties()
@@ -830,11 +896,14 @@ mod tests {
                 .as_ref()
                 .try_into_arrow()?;
 
+            let load_metrics = SnapshotLoadMetrics::from_snapshot(&snapshot);
+
             Ok((
                 Self {
                     inner: snapshot,
                     config: Default::default(),
                     schema: Arc::new(schema),
+                    load_metrics,
                 },
                 log_store,
             ))
