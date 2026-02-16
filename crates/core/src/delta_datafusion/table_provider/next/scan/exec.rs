@@ -34,6 +34,7 @@ use delta_kernel::{EvaluationHandler, ExpressionRef};
 use futures::stream::{Stream, StreamExt};
 
 use super::plan::KernelScanPlan;
+use crate::delta_datafusion::DeltaScanConfig;
 use crate::kernel::ARROW_HANDLER;
 use crate::kernel::arrow::engine_ext::ExpressionEvaluatorExt;
 
@@ -149,6 +150,36 @@ impl DeltaScanExec {
             retain_file_ids,
             properties,
         }
+    }
+
+    /// Returns a reference to the scan plan.
+    pub(crate) fn scan_plan(&self) -> &Arc<KernelScanPlan> {
+        &self.scan_plan
+    }
+
+    /// Returns the file ID column name.
+    pub(crate) fn file_id_column(&self) -> &str {
+        &self.file_id_column
+    }
+
+    /// Returns whether file IDs should be retained in output.
+    pub(crate) fn retain_file_ids(&self) -> bool {
+        self.retain_file_ids
+    }
+
+    /// Returns the scan configuration.
+    pub(crate) fn config(&self) -> DeltaScanConfig {
+        self.scan_plan.config()
+    }
+
+    /// Returns a reference to the transforms map.
+    pub(crate) fn transforms(&self) -> &Arc<HashMap<String, ExpressionRef>> {
+        &self.transforms
+    }
+
+    /// Returns a reference to the selection vectors.
+    pub(crate) fn selection_vectors(&self) -> &Arc<DashMap<String, Vec<bool>>> {
+        &self.selection_vectors
     }
 
     /// Transform the statistics from the inner physical parquet read plan to the logical

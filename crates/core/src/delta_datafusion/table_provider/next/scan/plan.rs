@@ -61,6 +61,8 @@ use crate::kernel::{Scan, Snapshot};
 pub(crate) struct KernelScanPlan {
     /// Wrapped kernel scan to produce logical file stream
     pub(crate) scan: Arc<Scan>,
+    /// Original snapshot used to create the scan (stored for codec serialization)
+    pub(crate) snapshot: Snapshot,
     /// The resulting schema exposed to the caller (used for expression evaluation)
     pub(crate) result_schema: SchemaRef,
     /// The final output schema (includes file_id column if configured)
@@ -109,7 +111,7 @@ impl KernelScanPlan {
 
         let Some(projection) = projection else {
             let scan = Arc::new(scan_builder.build()?);
-            return Self::try_new_with_scan(scan, config, table_schema, None, parquet_predicate);
+            return Self::try_new_with_scan(scan, snapshot, config, table_schema, None, parquet_predicate);
         };
 
         // The table projection may not include all columns referenced in filters,
@@ -171,6 +173,7 @@ impl KernelScanPlan {
 
         Self::try_new_with_scan(
             scan,
+            snapshot,
             config,
             result_schema,
             result_projection,
@@ -180,6 +183,7 @@ impl KernelScanPlan {
 
     fn try_new_with_scan(
         scan: Arc<Scan>,
+        snapshot: &Snapshot,
         config: &DeltaScanConfig,
         result_schema: SchemaRef,
         result_projection: Option<Vec<usize>>,
@@ -198,6 +202,7 @@ impl KernelScanPlan {
         )?;
         Ok(Self {
             scan,
+            snapshot: snapshot.clone(),
             result_schema,
             output_schema,
             result_projection,
@@ -205,6 +210,35 @@ impl KernelScanPlan {
             parquet_read_schema,
             parquet_predicate,
         })
+    }
+
+    /// Reconstruct a [`KernelScanPlan`] from serialized wire format data.
+    ///
+    /// This is used by the codec to rebuild the scan plan after deserialization.
+    /// Unlike `try_new`, this takes the scan schema directly rather than computing
+    /// it from a projection.
+    pub(crate) fn try_new_from_wire(
+        snapshot: &Snapshot,
+        scan_schema: &SchemaRef,
+        result_schema: SchemaRef,
+        result_projection: Option<Vec<usize>>,
+        parquet_predicate: Option<Expr>,
+        config: &DeltaScanConfig,
+    ) -> Result<Self> {
+        // Convert Arrow schema to kernel schema
+        let kernel_scan_schema = Arc::new(scan_schema.as_ref().try_into_kernel()?);
+
+        // Build the scan with the exact schema we had before serialization
+        let scan = Arc::new(snapshot.scan_builder().with_schema(kernel_scan_schema).build()?);
+
+        Self::try_new_with_scan(
+            scan,
+            snapshot,
+            config,
+            result_schema,
+            result_projection,
+            parquet_predicate,
+        )
     }
 
     /// Denotes if the scan can be resolved using only file metadata
@@ -217,6 +251,26 @@ impl KernelScanPlan {
 
     pub(crate) fn table_configuration(&self) -> &TableConfiguration {
         self.scan.snapshot().table_configuration()
+    }
+
+    /// Returns a reference to the underlying snapshot.
+    pub(crate) fn snapshot(&self) -> &Snapshot {
+        &self.snapshot
+    }
+
+    /// Returns the scan configuration derived from the scan plan.
+    ///
+    /// Note: This reconstructs a minimal config from the scan state.
+    /// Some fields may not be perfectly preserved through serialization.
+    pub(crate) fn config(&self) -> DeltaScanConfig {
+        DeltaScanConfig {
+            file_column_name: None, // Will be set from DeltaScanExec
+            wrap_partition_values: true,
+            enable_parquet_pushdown: self.parquet_predicate.is_some(),
+            schema_force_view_types: false,
+            schema: Some(self.result_schema.clone()),
+            options: Default::default(),
+        }
     }
 }
 

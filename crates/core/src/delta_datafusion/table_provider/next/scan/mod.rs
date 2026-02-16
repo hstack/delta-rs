@@ -53,6 +53,7 @@ use futures::{Stream, TryStreamExt as _, future::ready};
 use itertools::Itertools as _;
 use object_store::{ObjectMeta, path::Path};
 
+pub use self::codec::DeltaNextPhysicalCodec;
 pub use self::exec::DeltaScanExec;
 use self::exec_meta::DeltaScanMetaExec;
 pub(crate) use self::plan::{KernelScanPlan, supports_filters_pushdown};
@@ -70,6 +71,7 @@ mod exec;
 mod exec_meta;
 mod plan;
 mod replay;
+mod codec;
 
 type ScanMetadataStream = Pin<Box<dyn Stream<Item = Result<ScanMetadata, DeltaTableError>> + Send>>;
 
