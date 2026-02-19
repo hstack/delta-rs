@@ -26,10 +26,20 @@
 use std::fmt::Debug;
 use std::sync::Arc;
 
+use crate::delta_datafusion::expr::parse_predicate_expression;
+use crate::delta_datafusion::table_provider::DeltaScanWire;
+use crate::ensure_table_uri;
+use crate::errors::{DeltaResult, DeltaTableError};
+use crate::kernel::{Add, EagerSnapshot, LogDataHandler, Snapshot};
+use crate::table::state::DeltaTableState;
+use crate::{open_table, open_table_with_storage_options};
 use arrow::array::types::UInt16Type;
 use arrow::array::{Array, DictionaryArray, RecordBatch, StringArray, TypedDictionaryArray};
 use arrow_cast::{CastOptions, cast_with_options};
-use arrow_schema::{DataType as ArrowDataType, DataType, Field, Schema as ArrowSchema, SchemaRef, SchemaRef as ArrowSchemaRef, TimeUnit};
+use arrow_schema::{
+    DataType as ArrowDataType, DataType, Field, Schema as ArrowSchema, SchemaRef,
+    SchemaRef as ArrowSchemaRef, TimeUnit,
+};
 use datafusion::catalog::{Session, TableProviderFactory};
 use datafusion::common::scalar::ScalarValue;
 use datafusion::common::{
@@ -49,13 +59,6 @@ use datafusion_proto::physical_plan::PhysicalExtensionCodec;
 use delta_kernel::engine::arrow_conversion::TryIntoArrow as _;
 use either::Either;
 use tracing::info;
-use crate::delta_datafusion::expr::parse_predicate_expression;
-use crate::delta_datafusion::table_provider::DeltaScanWire;
-use crate::ensure_table_uri;
-use crate::errors::{DeltaResult, DeltaTableError};
-use crate::kernel::{Add, EagerSnapshot, LogDataHandler, Snapshot};
-use crate::table::state::DeltaTableState;
-use crate::{open_table, open_table_with_storage_options};
 
 pub(crate) use self::session::DeltaSessionExt;
 pub use self::session::{
@@ -71,7 +74,7 @@ pub(crate) use data_validation::{
 pub(crate) use find_files::*;
 pub use table_provider::{
     DeltaScan, DeltaScanConfig, DeltaScanConfigBuilder, DeltaTableProvider, TableProviderBuilder,
-    next::{DeltaScanExec, DeltaNextPhysicalCodec},
+    next::{DeltaNextPhysicalCodec, DeltaScanExec},
 };
 pub(crate) use table_provider::{
     DeltaScanBuilder, next::FILE_ID_COLUMN_DEFAULT, update_datafusion_session,
@@ -89,15 +92,15 @@ pub mod logical;
 pub mod physical;
 pub mod planner;
 mod session;
+use crate::delta_datafusion::schema_null::rewrite_schema_with_nullable_fields;
 pub use session::SessionFallbackPolicy;
 pub(crate) use session::{SessionResolveContext, resolve_session_state};
-use crate::delta_datafusion::schema_null::rewrite_schema_with_nullable_fields;
 
+mod schema_null;
 mod table_provider;
+pub mod table_provider_old;
 pub mod udtf;
 pub(crate) mod utils;
-pub mod table_provider_old;
-mod schema_null;
 
 impl From<DeltaTableError> for DataFusionError {
     fn from(err: DeltaTableError) -> Self {

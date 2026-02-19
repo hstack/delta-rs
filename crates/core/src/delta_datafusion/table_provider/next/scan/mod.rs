@@ -22,6 +22,8 @@ use arrow_cast::{CastOptions, cast_with_options};
 use arrow_schema::{DataType, FieldRef, Schema, SchemaBuilder, SchemaRef};
 use chrono::{TimeZone as _, Utc};
 use dashmap::DashMap;
+use datafusion::common::deep::has_deep_projection;
+use datafusion::common::internal_err;
 use datafusion::{
     catalog::Session,
     common::{
@@ -39,13 +41,11 @@ use datafusion::{
     },
     prelude::Expr,
 };
-use datafusion::common::deep::has_deep_projection;
-use datafusion::common::internal_err;
+use datafusion_datasource::file::FileSource;
 use datafusion_datasource::{
     PartitionedFile, TableSchema, compute_all_files_statistics, file_groups::FileGroup,
     file_scan_config::FileScanConfigBuilder, source::DataSourceExec,
 };
-use datafusion_datasource::file::FileSource;
 use delta_kernel::{
     Engine, Expression, expressions::StructData, scan::ScanMetadata, table_features::TableFeature,
 };
@@ -67,11 +67,11 @@ use crate::{
     },
 };
 
+mod codec;
 mod exec;
 mod exec_meta;
 mod plan;
 mod replay;
-mod codec;
 
 type ScanMetadataStream = Pin<Box<dyn Stream<Item = Result<ScanMetadata, DeltaTableError>> + Send>>;
 
@@ -236,7 +236,8 @@ async fn get_data_scan_plan(
     // we just need to set the deep projections in the ParquetOpener via ProjectionExprs
     // let pq_plan = if false {
     let pq_plan = if let Some(result_projection_deep) = scan_plan.result_projection_deep.clone()
-        && has_deep_projection(&result_projection_deep) {
+        && has_deep_projection(&result_projection_deep)
+    {
         get_read_plan_deep(
             session,
             files_by_store,
@@ -244,7 +245,7 @@ async fn get_data_scan_plan(
             limit,
             &file_id_field,
             predicate,
-            result_projection_deep.clone()
+            result_projection_deep.clone(),
         )
         .await?
     } else {
@@ -415,7 +416,7 @@ async fn get_read_plan_deep(
     limit: Option<usize>,
     file_id_field: &FieldRef,
     predicate: Option<&Expr>,
-    projection_deep: std::collections::HashMap<usize, Vec<String>>
+    projection_deep: std::collections::HashMap<usize, Vec<String>>,
 ) -> Result<Arc<dyn ExecutionPlan>> {
     let mut plans = Vec::new();
 
@@ -456,10 +457,14 @@ async fn get_read_plan_deep(
             projection_exprs.projection_deep = Some(projection_deep.clone());
             let new_file_source = file_source.try_pushdown_projection(&projection_exprs)?;
             if let Some(new_file_source) = new_file_source {
-                file_source = new_file_source.as_any().downcast_ref::<ParquetSource>().unwrap().clone();
+                file_source = new_file_source
+                    .as_any()
+                    .downcast_ref::<ParquetSource>()
+                    .unwrap()
+                    .clone();
             } else {
                 return internal_err!(
-                  "get_read_plan_deep, error pushing projections in pushdown with deep: {:?}",
+                    "get_read_plan_deep, error pushing projections in pushdown with deep: {:?}",
                     &projection_deep
                 );
             }

@@ -52,17 +52,17 @@ use crate::logstore::{LogStore, LogStoreExt};
 use crate::{DeltaResult, DeltaTableConfig, DeltaTableError, PartitionFilter, to_kernel_predicate};
 
 pub use self::log_data::*;
+use crate::kernel::size_limits::SnapshotLoadMetrics;
 pub use iterators::*;
 pub use scan::*;
 pub use stream::*;
-use crate::kernel::size_limits::SnapshotLoadMetrics;
 
 mod iterators;
 mod log_data;
 mod scan;
 mod serde;
-mod stream;
 pub mod size_limits;
+mod stream;
 
 pub(crate) static SCAN_ROW_ARROW_SCHEMA: LazyLock<arrow_schema::SchemaRef> =
     LazyLock::new(|| Arc::new(scan_row_schema().as_ref().try_into_arrow().unwrap()));
@@ -120,10 +120,12 @@ impl Snapshot {
                 .map(|p| p.location.size)
                 .sum();
 
-            let (truncated_segment, truncation_info) = limiter.truncate(original_segment, log_store).await?;
+            let (truncated_segment, truncation_info) =
+                limiter.truncate(original_segment, log_store).await?;
             let table_configuration = snapshot.table_configuration().clone();
 
-            let oldest_version = truncated_segment.ascending_commit_files
+            let oldest_version = truncated_segment
+                .ascending_commit_files
                 .first()
                 .map(|p| p.version as i64);
 
@@ -136,14 +138,13 @@ impl Snapshot {
                     info.commits_discarded,
                 )
             } else {
-                SnapshotLoadMetrics::no_truncation(
-                    current_version,
-                    oldest_version,
-                    original_size,
-                )
+                SnapshotLoadMetrics::no_truncation(current_version, oldest_version, original_size)
             };
 
-            (Arc::new(KernelSnapshot::new(truncated_segment, table_configuration)), metrics)
+            (
+                Arc::new(KernelSnapshot::new(truncated_segment, table_configuration)),
+                metrics,
+            )
         } else {
             let metrics = SnapshotLoadMetrics::from_snapshot(&snapshot);
             (snapshot, metrics)
@@ -182,7 +183,14 @@ impl Snapshot {
             table_root.set_path(&format!("{}/", table_root.path()));
         }
 
-        Self::try_new_with_engine(log_store, engine, table_root, config, version.map(|v| v as u64)).await
+        Self::try_new_with_engine(
+            log_store,
+            engine,
+            table_root,
+            config,
+            version.map(|v| v as u64),
+        )
+        .await
     }
 
     pub fn scan_builder(&self) -> ScanBuilder {
@@ -236,15 +244,13 @@ impl Snapshot {
             .map(|p| p.location.size)
             .sum();
 
-        let oldest_version = log_segment.ascending_commit_files
+        let oldest_version = log_segment
+            .ascending_commit_files
             .first()
             .map(|p| p.version as i64);
 
-        let load_metrics = SnapshotLoadMetrics::no_truncation(
-            snapshot.version() as i64,
-            oldest_version,
-            log_size,
-        );
+        let load_metrics =
+            SnapshotLoadMetrics::no_truncation(snapshot.version() as i64, oldest_version, log_size);
 
         Ok(Arc::new(Self {
             inner: snapshot,
@@ -759,16 +765,15 @@ impl EagerSnapshot {
 
     /// Get the metadata size in the snapshot
     pub fn files_metadata_size(&self) -> usize {
-        self
-            .files
+        self.files
             .iter()
-            .map(|frb| frb.get_array_memory_size()).sum()
+            .map(|frb| frb.get_array_memory_size())
+            .sum()
     }
 
     /// Get the total size of files in the snapshot
     pub fn files_total_size(&self) -> usize {
-        self
-            .files
+        self.files
             .iter()
             .map(|frb| read_adds_size(frb).unwrap_or_default())
             .sum()

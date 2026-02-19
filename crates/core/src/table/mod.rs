@@ -32,8 +32,8 @@ pub mod state;
 mod columns;
 
 // Re-exposing for backwards compatibility
-pub use columns::*;
 use crate::kernel::size_limits::SnapshotLoadMetrics;
+pub use columns::*;
 
 /// In memory representation of a Delta Table
 ///

@@ -215,8 +215,12 @@ pub fn cast_record_batch(
         None,
         batch.num_rows(),
     )?;
-    struct_array = cast_struct(&struct_array, target_schema.fields(), &cast_options, add_missing)?;
-
+    struct_array = cast_struct(
+        &struct_array,
+        target_schema.fields(),
+        &cast_options,
+        add_missing,
+    )?;
 
     Ok(RecordBatch::try_new_with_options(
         target_schema,

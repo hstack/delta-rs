@@ -1,20 +1,20 @@
-use std::any::Any;
-use std::borrow::Cow;
-use std::sync::Arc;
+use crate::delta_datafusion::table_provider::get_pushdown_filters;
+use crate::delta_datafusion::{DataFusionMixins, DeltaScanBuilder, DeltaScanConfigBuilder};
+use crate::logstore::LogStoreRef;
+use crate::table::state::DeltaTableState;
+use crate::{DeltaResult, DeltaTable, DeltaTableConfig, DeltaTableError};
 use arrow_schema::Schema;
 use datafusion::catalog::{ScanArgs, ScanResult, Session, TableProvider};
 use datafusion::common::{Result, Statistics};
 use datafusion::datasource::TableType;
 use datafusion::execution::runtime_env::RuntimeEnv;
-use datafusion::logical_expr::{Expr, LogicalPlan, TableProviderFilterPushDown};
 use datafusion::logical_expr::utils::conjunction;
+use datafusion::logical_expr::{Expr, LogicalPlan, TableProviderFilterPushDown};
 use datafusion::physical_plan::ExecutionPlan;
+use std::any::Any;
+use std::borrow::Cow;
+use std::sync::Arc;
 use url::Url;
-use crate::delta_datafusion::{DataFusionMixins, DeltaScanBuilder, DeltaScanConfigBuilder};
-use crate::delta_datafusion::table_provider::get_pushdown_filters;
-use crate::{DeltaResult, DeltaTable, DeltaTableConfig, DeltaTableError};
-use crate::logstore::LogStoreRef;
-use crate::table::state::DeltaTableState;
 
 impl DeltaTable {
     pub fn table_provider_old(&self) -> DeltaTableOldProvider {
@@ -54,7 +54,7 @@ impl From<DeltaTable> for DeltaTableOldProvider {
         Self {
             state: value.state.clone(),
             config: value.config.clone(),
-            log_store: value.log_store.clone()
+            log_store: value.log_store.clone(),
         }
     }
 }
@@ -91,7 +91,11 @@ impl TableProvider for DeltaTableOldProvider {
         unimplemented!("scan is not available for this table provider; use scan_with_args")
     }
 
-    async fn scan_with_args<'a>(&self, state: &dyn Session, args: ScanArgs<'a>) -> Result<ScanResult> {
+    async fn scan_with_args<'a>(
+        &self,
+        state: &dyn Session,
+        args: ScanArgs<'a>,
+    ) -> Result<ScanResult> {
         register_store(self.log_store(), state.runtime_env().as_ref());
         let filters = args.filters().unwrap_or(&[]);
         let filter_expr = conjunction(filters.iter().cloned());
@@ -121,7 +125,7 @@ impl TableProvider for DeltaTableOldProvider {
 
         Ok(ScanResult::new(Arc::new(scan)))
     }
-    
+
     fn supports_filters_pushdown(
         &self,
         filter: &[&Expr],

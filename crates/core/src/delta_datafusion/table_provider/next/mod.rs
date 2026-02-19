@@ -29,9 +29,18 @@
 use std::any::Any;
 use std::{borrow::Cow, sync::Arc};
 
+pub(crate) use self::scan::KernelScanPlan;
+pub use self::scan::{DeltaNextPhysicalCodec, DeltaScanExec};
+use crate::delta_datafusion::engine::AsObjectStoreUrl;
+use crate::delta_datafusion::engine::DataFusionEngine;
+use crate::delta_datafusion::table_provider::TableProviderBuilder;
+use crate::delta_datafusion::{DeltaScanConfig, DeltaSessionExt};
+use crate::kernel::{EagerSnapshot, Snapshot};
 use arrow::datatypes::{Schema, SchemaRef};
+use datafusion::catalog::{ScanArgs, ScanResult};
 use datafusion::common::Result;
 use datafusion::datasource::TableType;
+use datafusion::error::DataFusionError;
 use datafusion::logical_expr::TableProviderFilterPushDown;
 use datafusion::prelude::Expr;
 use datafusion::{
@@ -39,24 +48,15 @@ use datafusion::{
     logical_expr::LogicalPlan,
     physical_plan::ExecutionPlan,
 };
-use datafusion::catalog::{ScanArgs, ScanResult};
-use datafusion::error::DataFusionError;
 use delta_kernel::table_configuration::TableConfiguration;
 use serde::{Deserialize, Serialize};
 use url::Url;
-use crate::delta_datafusion::engine::AsObjectStoreUrl;
-pub use self::scan::{DeltaScanExec, DeltaNextPhysicalCodec};
-pub(crate) use self::scan::KernelScanPlan;
-use crate::delta_datafusion::{DeltaScanConfig, DeltaSessionExt};
-use crate::delta_datafusion::engine::DataFusionEngine;
-use crate::delta_datafusion::table_provider::TableProviderBuilder;
-use crate::kernel::{EagerSnapshot, Snapshot};
 
 mod scan;
 
 /// Default column name for the file id column we add to files read from disk.
 pub(crate) use crate::delta_datafusion::file_id::FILE_ID_COLUMN_DEFAULT;
-use crate::logstore::{object_store_factories, StorageConfig};
+use crate::logstore::{StorageConfig, object_store_factories};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SnapshotWrapper {
@@ -220,14 +220,23 @@ impl TableProvider for DeltaScan {
         scan::execution_plan(&self.config, session, scan_plan, stream, engine, limit).await
     }
 
-    async fn scan_with_args<'a>(&self, state: &dyn Session, args: ScanArgs<'a>) -> Result<ScanResult> {
+    async fn scan_with_args<'a>(
+        &self,
+        state: &dyn Session,
+        args: ScanArgs<'a>,
+    ) -> Result<ScanResult> {
         let engine = DataFusionEngine::new_from_session(state);
         let table_uri = self.snapshot.table_configuration().table_root();
-        if state.runtime_env().object_store(table_uri.as_object_store_url()).is_err() {
+        if state
+            .runtime_env()
+            .object_store(table_uri.as_object_store_url())
+            .is_err()
+        {
             let url_key = Url::parse(&format!("{}://", table_uri.scheme()))
                 .map_err(|e| DataFusionError::External(Box::new(e)))?;
             if let Some(entry) = object_store_factories().get(&url_key) {
-                let storage_config = StorageConfig::parse_options(&self.snapshot.snapshot().load_config().options)?;
+                let storage_config =
+                    StorageConfig::parse_options(&self.snapshot.snapshot().load_config().options)?;
                 let (store, _) = entry.value().parse_url_opts(table_uri, &storage_config)?;
                 state.runtime_env().register_object_store(table_uri, store);
             }
@@ -272,10 +281,10 @@ impl TableProvider for DeltaScan {
             }
         };
 
-        scan::execution_plan(&self.config, state, scan_plan, stream, engine, args.limit()).await
+        scan::execution_plan(&self.config, state, scan_plan, stream, engine, args.limit())
+            .await
             .map(ScanResult::new)
     }
-
 
     fn supports_filters_pushdown(
         &self,

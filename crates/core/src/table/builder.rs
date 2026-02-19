@@ -12,10 +12,10 @@ use tracing::debug;
 use url::Url;
 
 use super::normalize_table_url;
+use crate::kernel::size_limits::LogSizeLimiter;
 use crate::logstore::storage::IORuntime;
 use crate::logstore::{LogStoreRef, StorageConfig, object_store_factories};
 use crate::{DeltaResult, DeltaTable, DeltaTableError};
-use crate::kernel::size_limits::LogSizeLimiter;
 
 /// possible version specifications for loading a delta table
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
@@ -219,7 +219,14 @@ impl DeltaTableBuilder {
             storage_options
                 .clone()
                 .into_iter()
-                .map(|(k, v)| (k.strip_prefix("deltalake.").map(ToString::to_string).unwrap_or(k), v))
+                .map(|(k, v)| {
+                    (
+                        k.strip_prefix("deltalake.")
+                            .map(ToString::to_string)
+                            .unwrap_or(k),
+                        v,
+                    )
+                })
                 .map(|(k, v)| {
                     let needs_trim = v.starts_with("http://")
                         || v.starts_with("https://")
@@ -609,7 +616,7 @@ mod tests {
         DeltaTableBuilder::from_url(Url::parse("this://is.nonsense").unwrap())
             .expect_err("this should be an error");
     }
-    
+
     #[test]
     fn test_writer_storage_opts_url_trim() {
         let cases = [
