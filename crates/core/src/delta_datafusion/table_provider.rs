@@ -83,8 +83,6 @@ pub struct DeltaScanConfigBuilder {
     pub(super) enable_parquet_pushdown: bool,
     /// Schema to scan table with
     pub(super) schema: Option<SchemaRef>,
-    /// options passed down to the store
-    pub(super) options: std::collections::HashMap<String, String>
 }
 
 impl Default for DeltaScanConfigBuilder {
@@ -95,7 +93,6 @@ impl Default for DeltaScanConfigBuilder {
             wrap_partition_values: None,
             enable_parquet_pushdown: true,
             schema: None,
-            options: std::collections::HashMap::new(),
         }
     }
 }
@@ -137,12 +134,6 @@ impl DeltaScanConfigBuilder {
     /// Use the provided [SchemaRef] for the [DeltaScan]
     pub fn with_schema(mut self, schema: SchemaRef) -> Self {
         self.schema = Some(schema);
-        self
-    }
-
-    /// Use the provided [SchemaRef] for the [DeltaScan]
-    pub fn with_options(mut self, options: std::collections::HashMap<String, String>) -> Self {
-        self.options = options;
         self
     }
 
@@ -188,7 +179,6 @@ impl DeltaScanConfigBuilder {
             enable_parquet_pushdown: self.enable_parquet_pushdown,
             schema: self.schema.clone(),
             schema_force_view_types: true,
-            options: self.options.clone(),
         })
     }
 }
@@ -207,8 +197,6 @@ pub struct DeltaScanConfig {
     pub schema_force_view_types: bool,
     /// Schema to read as
     pub schema: Option<SchemaRef>,
-    /// options to pass down to store
-    pub options: std::collections::HashMap<String, String>,
 }
 
 impl Default for DeltaScanConfig {
@@ -226,7 +214,6 @@ impl DeltaScanConfig {
             enable_parquet_pushdown: true,
             schema_force_view_types: true,
             schema: None,
-            options: std::collections::HashMap::new(),
         }
     }
 
@@ -238,7 +225,6 @@ impl DeltaScanConfig {
             enable_parquet_pushdown: config_options.execution.parquet.pushdown_filters,
             schema_force_view_types: config_options.execution.parquet.schema_force_view_types,
             schema: None,
-            options: std::collections::HashMap::new(),
         }
     }
 

@@ -59,10 +59,6 @@ pub struct DeltaTableConfig {
     pub io_runtime: Option<IORuntime>,
 
     #[delta(skip)]
-    /// options to pass down to store
-    pub options: HashMap<String, String>,
-
-    #[delta(skip)]
     pub log_size_limiter: Option<LogSizeLimiter>,
 }
 
@@ -73,7 +69,6 @@ impl Default for DeltaTableConfig {
             log_buffer_size: num_cpus::get() * 4,
             log_batch_size: 1024,
             io_runtime: None,
-            options: HashMap::new(),
             log_size_limiter: None,
         }
     }
@@ -297,11 +292,7 @@ impl DeltaTableBuilder {
     /// This will not load the log, i.e. the table is not initialized. To get an initialized
     /// table use the `load` function
     pub fn build(self) -> DeltaResult<DeltaTable> {
-        let log_store = self.build_storage()?;
-        let mut config = (self).table_config.clone();
-        config.options = self.storage_options.clone().unwrap_or_default();
-
-        Ok(DeltaTable::new(self.build_storage()?, config))
+        Ok(DeltaTable::new(self.build_storage()?, self.table_config))
     }
 
     /// Build the [`DeltaTable`] and load its state

@@ -102,11 +102,9 @@ impl TableProvider for DeltaTableOldProvider {
             wrap_partition_values: None,
             enable_parquet_pushdown: true,
             schema: None,
-            options: std::collections::HashMap::new(),
         };
 
         let config = config
-            .with_options(self.config.options.clone())
             .build(self.snapshot()?.snapshot())?;
 
         let projection = args.projection().map(|p| p.to_vec());
