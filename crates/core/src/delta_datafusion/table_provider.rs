@@ -8,8 +8,8 @@ use arrow::compute::filter_record_batch;
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow::error::ArrowError;
 use chrono::{DateTime, TimeZone, Utc};
-use datafusion::catalog::{ScanArgs, ScanResult, TableProvider};
 use datafusion::catalog::memory::DataSourceExec;
+use datafusion::catalog::{ScanArgs, ScanResult, TableProvider};
 use datafusion::common::pruning::PruningStatistics;
 use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion::common::{Column, ColumnStatistics, DFSchemaRef, Result, Statistics, ToDFSchema};
@@ -84,7 +84,7 @@ pub struct DeltaScanConfigBuilder {
     /// Schema to scan table with
     pub(super) schema: Option<SchemaRef>,
     /// options passed down to the store
-    pub(super) options: std::collections::HashMap<String, String>
+    pub(super) options: std::collections::HashMap<String, String>,
 }
 
 impl Default for DeltaScanConfigBuilder {
@@ -317,8 +317,8 @@ impl<'a> DeltaScanBuilder<'a> {
     }
 
     pub fn with_projection_deep(
-            mut self,
-            projection_deep: Option<&'a std::collections::HashMap<usize, Vec<String>>>,
+        mut self,
+        projection_deep: Option<&'a std::collections::HashMap<usize, Vec<String>>>,
     ) -> Self {
         self.projection_deep = projection_deep;
         self
@@ -441,7 +441,8 @@ impl<'a> DeltaScanBuilder<'a> {
                     for (file_view, keep) in self
                         .snapshot
                         .log_data()
-                        .into_iter().zip(files_to_prune.iter().cloned())
+                        .into_iter()
+                        .zip(files_to_prune.iter().cloned())
                     {
                         // prune file based on predicate pushdown
                         let action = file_view.add_action_no_stats();
@@ -952,7 +953,11 @@ impl TableProvider for DeltaTableProvider {
         Ok(Arc::new(scan.build().await?))
     }
 
-    async fn scan_with_args<'a>(&self, state: &dyn Session, args: ScanArgs<'a>) -> Result<ScanResult> {
+    async fn scan_with_args<'a>(
+        &self,
+        state: &dyn Session,
+        args: ScanArgs<'a>,
+    ) -> Result<ScanResult> {
         state.ensure_log_store_registered(self.log_store.as_ref())?;
         let filters = args.filters().unwrap_or(&[]);
         let filter_expr = conjunction(filters.iter().cloned());
@@ -970,7 +975,6 @@ impl TableProvider for DeltaTableProvider {
         }
         Ok(ScanResult::new(Arc::new(scan.build().await?)))
     }
-
 
     fn supports_filters_pushdown(
         &self,

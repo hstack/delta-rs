@@ -219,10 +219,13 @@ impl<'de> Visitor<'de> for SnapshotVisitor {
             .try_into_arrow()
             .map_err(de::Error::custom)?;
 
+        let load_metrics = super::SnapshotLoadMetrics::from_snapshot(&snapshot);
+
         Ok(Snapshot {
             inner: Arc::new(snapshot),
             schema: Arc::new(schema),
             config,
+            load_metrics,
         })
     }
 }

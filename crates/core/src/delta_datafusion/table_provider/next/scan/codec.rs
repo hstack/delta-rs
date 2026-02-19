@@ -22,8 +22,8 @@ use serde::{Deserialize, Serialize};
 
 use super::DeltaScanExec;
 use super::plan::KernelScanPlan;
-use crate::delta_datafusion::engine::{to_datafusion_expr, to_delta_expression};
 use crate::delta_datafusion::DeltaScanConfig;
+use crate::delta_datafusion::engine::{to_datafusion_expr, to_delta_expression};
 use crate::kernel::Snapshot;
 
 /// Codec for serializing/deserializing [`DeltaScanExec`] physical plans.
@@ -53,9 +53,12 @@ impl PhysicalExtensionCodec for DeltaNextPhysicalCodec {
         node: Arc<dyn ExecutionPlan>,
         buf: &mut Vec<u8>,
     ) -> datafusion::common::Result<()> {
-        let delta_scan = node.as_any().downcast_ref::<DeltaScanExec>().ok_or_else(|| {
-            DataFusionError::Internal("Expected DeltaScanExec for encoding".to_string())
-        })?;
+        let delta_scan = node
+            .as_any()
+            .downcast_ref::<DeltaScanExec>()
+            .ok_or_else(|| {
+                DataFusionError::Internal("Expected DeltaScanExec for encoding".to_string())
+            })?;
 
         let wire = DeltaScanExecWire::try_from(delta_scan)?;
         serde_json::to_writer(buf, &wire).map_err(|e| {
@@ -120,8 +123,7 @@ impl TryFrom<&DeltaScanExec> for DeltaScanExecWire {
             .transforms
             .iter()
             .map(|(file_url, kernel_expr)| {
-                serialize_transform(kernel_expr.as_ref())
-                    .map(|wire| (file_url.clone(), wire))
+                serialize_transform(kernel_expr.as_ref()).map(|wire| (file_url.clone(), wire))
             })
             .collect::<Result<_, _>>()?;
 
@@ -267,7 +269,12 @@ impl DeltaScanExecWire {
         let kernel_scan_schema = Arc::new(self.scan_schema.as_ref().try_into_kernel()?);
 
         // Build the scan with the exact schema we had before serialization
-        let scan = Arc::new(self.snapshot.scan_builder().with_schema(kernel_scan_schema).build()?);
+        let scan = Arc::new(
+            self.snapshot
+                .scan_builder()
+                .with_schema(kernel_scan_schema)
+                .build()?,
+        );
         let mut config = DeltaScanConfig::new();
         if self.retain_file_ids {
             config = config.with_file_column_name(self.file_id_column.clone());
@@ -372,18 +379,15 @@ mod tests {
             extract_delta_scan_exec(&decoded).expect("Expected DeltaScanExec after decode");
 
         assert_eq!(
-            delta_scan.scan_plan.result_schema,
-            decoded_delta_scan.scan_plan.result_schema,
+            delta_scan.scan_plan.result_schema, decoded_delta_scan.scan_plan.result_schema,
             "Result schemas should match"
         );
         assert_eq!(
-            delta_scan.file_id_column,
-            decoded_delta_scan.file_id_column,
+            delta_scan.file_id_column, decoded_delta_scan.file_id_column,
             "File ID columns should match"
         );
         assert_eq!(
-            delta_scan.retain_file_ids,
-            decoded_delta_scan.retain_file_ids,
+            delta_scan.retain_file_ids, decoded_delta_scan.retain_file_ids,
             "Retain file IDs should match"
         );
 
@@ -442,8 +446,7 @@ mod tests {
             extract_delta_scan_exec(&decoded).expect("Expected DeltaScanExec after decode");
 
         assert_eq!(
-            delta_scan.scan_plan.result_schema,
-            decoded_delta_scan.scan_plan.result_schema,
+            delta_scan.scan_plan.result_schema, decoded_delta_scan.scan_plan.result_schema,
             "Result schemas should match with filter"
         );
 
@@ -509,17 +512,26 @@ mod tests {
         let column_expr = KernelExpression::Column(ColumnName::new(["test_column"]));
         let serialized = serialize_kernel_expression(&column_expr).unwrap();
         let deserialized = deserialize_kernel_expression(&serialized).unwrap();
-        assert_eq!(column_expr, deserialized, "Column expression should roundtrip");
+        assert_eq!(
+            column_expr, deserialized,
+            "Column expression should roundtrip"
+        );
 
         let literal_expr = KernelExpression::Literal(Scalar::Integer(42));
         let serialized = serialize_kernel_expression(&literal_expr).unwrap();
         let deserialized = deserialize_kernel_expression(&serialized).unwrap();
-        assert_eq!(literal_expr, deserialized, "Literal expression should roundtrip");
+        assert_eq!(
+            literal_expr, deserialized,
+            "Literal expression should roundtrip"
+        );
 
         let string_literal = KernelExpression::Literal(Scalar::String("hello".to_string()));
         let serialized = serialize_kernel_expression(&string_literal).unwrap();
         let deserialized = deserialize_kernel_expression(&serialized).unwrap();
-        assert_eq!(string_literal, deserialized, "String literal should roundtrip");
+        assert_eq!(
+            string_literal, deserialized,
+            "String literal should roundtrip"
+        );
     }
 
     #[tokio::test]
@@ -582,8 +594,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_codec_roundtrip_with_deletion_vectors() -> TestResult {
-        let plan =
-            create_delta_scan_exec_from_table(TestTables::WithDvSmall, &[], None).await?;
+        let plan = create_delta_scan_exec_from_table(TestTables::WithDvSmall, &[], None).await?;
         let delta_scan = extract_delta_scan_exec(&plan).expect("Expected DeltaScanExec");
 
         assert!(

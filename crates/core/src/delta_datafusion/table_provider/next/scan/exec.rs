@@ -9,6 +9,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use super::plan::KernelScanPlan;
+use crate::kernel::ARROW_HANDLER;
+use crate::kernel::arrow::engine_ext::ExpressionEvaluatorExt;
 use arrow::array::{RecordBatch, StringArray};
 use arrow::compute::filter_record_batch;
 use arrow::datatypes::{SchemaRef, UInt16Type};
@@ -32,9 +35,6 @@ use delta_kernel::schema::DataType as KernelDataType;
 use delta_kernel::table_features::TableFeature;
 use delta_kernel::{EvaluationHandler, ExpressionRef};
 use futures::stream::{Stream, StreamExt};
-use super::plan::KernelScanPlan;
-use crate::kernel::ARROW_HANDLER;
-use crate::kernel::arrow::engine_ext::ExpressionEvaluatorExt;
 
 #[derive(Debug, PartialEq)]
 pub(crate) struct DvMaskResult {

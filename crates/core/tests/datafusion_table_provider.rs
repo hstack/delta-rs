@@ -5,8 +5,6 @@ use arrow_array::RecordBatch;
 use datafusion::assert_batches_sorted_eq;
 use datafusion::physical_plan::{ExecutionPlan, collect_partitioned};
 use datafusion::prelude::{SessionContext, col, lit};
-use object_store::local::LocalFileSystem;
-use url::Url;
 use deltalake_core::delta_datafusion::DeltaScanNext;
 use deltalake_core::delta_datafusion::create_session;
 use deltalake_core::delta_datafusion::engine::DataFusionEngine;
@@ -14,6 +12,8 @@ use deltalake_core::kernel::Snapshot;
 use deltalake_core::logstore::default_logstore;
 use deltalake_test::TestResult;
 use deltalake_test::acceptance::read_dat_case;
+use object_store::local::LocalFileSystem;
+use url::Url;
 
 async fn scan_dat(case: &str) -> TestResult<(Snapshot, SessionContext)> {
     let root_dir = format!(
@@ -35,9 +35,14 @@ async fn scan_dat(case: &str) -> TestResult<(Snapshot, SessionContext)> {
         &Default::default(),
     );
 
-    let snapshot =
-        Snapshot::try_new_with_engine(log_store.as_ref(), engine.clone(), case.table_root()?, Default::default(), None)
-            .await?;
+    let snapshot = Snapshot::try_new_with_engine(
+        log_store.as_ref(),
+        engine.clone(),
+        case.table_root()?,
+        Default::default(),
+        None,
+    )
+    .await?;
 
     Ok((snapshot, session))
 }

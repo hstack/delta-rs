@@ -111,7 +111,14 @@ impl KernelScanPlan {
 
         let Some(projection) = projection else {
             let scan = Arc::new(scan_builder.build()?);
-            return Self::try_new_with_scan(scan, snapshot, config, table_schema, None, parquet_predicate);
+            return Self::try_new_with_scan(
+                scan,
+                snapshot,
+                config,
+                table_schema,
+                None,
+                parquet_predicate,
+            );
         };
 
         // The table projection may not include all columns referenced in filters,
@@ -223,7 +230,6 @@ impl KernelScanPlan {
     pub(crate) fn table_configuration(&self) -> &TableConfiguration {
         self.scan.snapshot().table_configuration()
     }
-
 }
 
 impl DeltaScanConfig {
