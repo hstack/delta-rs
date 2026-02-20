@@ -980,15 +980,16 @@ impl TableProvider for DeltaTableProvider {
 #[derive(Debug)]
 pub struct DeltaScan {
     /// The normalized [Url] of the ObjectStore root
-    table_url: Url,
+    pub table_url: Url,
     /// Column that contains an index that maps to the original metadata Add
-    pub(crate) config: DeltaScanConfig,
+    pub config: DeltaScanConfig,
     /// The parquet scan to wrap
-    pub(crate) parquet_scan: Arc<dyn ExecutionPlan>,
+    pub parquet_scan: Arc<dyn ExecutionPlan>,
     /// The schema of the table to be used when evaluating expressions
-    pub(crate) logical_schema: Arc<Schema>,
+    pub logical_schema: Arc<Schema>,
     /// Metrics for scan reported via DataFusion
-    metrics: ExecutionPlanMetricsSet,
+    /// @HStack - exposed this builder so we can recreate DeltaScan
+    pub metrics: ExecutionPlanMetricsSet,
 }
 
 impl DeltaScan {

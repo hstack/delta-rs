@@ -14,7 +14,7 @@ pub(crate) use merge_schema::*;
 
 use crate::DeltaResult;
 
-fn cast_struct(
+pub fn cast_struct(
     struct_array: &StructArray,
     fields: &Fields,
     cast_options: &CastOptions,
@@ -47,7 +47,7 @@ fn cast_struct(
     )
 }
 
-fn cast_list<T: OffsetSizeTrait>(
+pub fn cast_list<T: OffsetSizeTrait>(
     array: &GenericListArray<T>,
     field: &FieldRef,
     cast_options: &CastOptions,
@@ -62,7 +62,7 @@ fn cast_list<T: OffsetSizeTrait>(
     )
 }
 
-fn cast_map(
+pub fn cast_map(
     array: &MapArray,
     entries_field: &FieldRef,
     sorted: bool,
@@ -86,7 +86,7 @@ fn cast_map(
     }
 }
 
-fn cast_field(
+pub fn cast_field(
     col: &ArrayRef,
     field: &FieldRef,
     cast_options: &CastOptions,
