@@ -69,6 +69,7 @@ use crate::{
         table_provider::next::DeletionVectorSelection,
     },
 };
+use crate::delta_datafusion::expr_adapter::build_expr_adapter_factory;
 
 mod exec;
 mod exec_meta;
@@ -451,7 +452,9 @@ async fn get_read_plan(
     full_read_schema.push(file_id_field.as_ref().clone().with_nullable(true));
     let full_read_schema = Arc::new(full_read_schema.finish());
     let parquet_predicate_df_schema = parquet_predicate_schema.clone().to_dfschema()?;
-    let adapter_factory = Arc::new(DefaultPhysicalExprAdapterFactory {});
+    // let adapter_factory = Arc::new(DefaultPhysicalExprAdapterFactory {});
+    let adapter_factory =
+        build_expr_adapter_factory().unwrap();
 
     for (store_url, files) in files_by_store.into_iter() {
         let reader_factory = Arc::new(CachedParquetFileReaderFactory::new(
@@ -521,7 +524,7 @@ async fn get_read_plan(
             .with_file_groups(file_groups)
             .with_statistics(statistics)
             .with_limit(limit)
-            .with_expr_adapter(Some(adapter_factory.clone() as _))
+            .with_expr_adapter(build_expr_adapter_factory())
             .build();
 
         plans.push(DataSourceExec::from_data_source(config) as Arc<dyn ExecutionPlan>);
@@ -588,8 +591,10 @@ struct SchemaAdapter {
 
 impl SchemaAdapter {
     fn new(target_schema: SchemaRef) -> Self {
+        let factory = BatchAdapterFactory::new(target_schema)
+            .with_adapter_factory(build_expr_adapter_factory().unwrap());
         Self {
-            factory: BatchAdapterFactory::new(target_schema),
+            factory,
             cached_source: None,
             cached_adapter: None,
         }

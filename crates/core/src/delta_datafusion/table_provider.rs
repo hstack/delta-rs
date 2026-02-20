@@ -39,6 +39,7 @@ use datafusion::{
     prelude::Expr,
     scalar::ScalarValue,
 };
+use datafusion::physical_expr_adapter::{DefaultPhysicalExprAdapterFactory, PhysicalExprAdapterFactory};
 use futures::TryStreamExt as _;
 use futures::future::BoxFuture;
 use object_store::ObjectMeta;
@@ -59,6 +60,7 @@ use crate::logstore::LogStoreExt as _;
 use crate::protocol::SaveMode;
 use crate::table::normalize_table_url;
 use crate::{DeltaResult, DeltaTable, DeltaTableError, logstore::LogStoreRef};
+use crate::delta_datafusion::expr_adapter::build_expr_adapter_factory;
 
 mod data_sink;
 pub(crate) mod next;
@@ -557,6 +559,8 @@ impl<'a> DeltaScanBuilder<'a> {
                 )
                 .with_projection_indices(self.projection.cloned())?
                 .with_limit(self.limit)
+                // @Hstack fixme
+                .with_expr_adapter(build_expr_adapter_factory())
                 .build();
 
         let metrics = ExecutionPlanMetricsSet::new();
