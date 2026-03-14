@@ -263,7 +263,7 @@ impl Snapshot {
         log_store: &dyn LogStore,
         predicate: Option<PredicateRef>,
     ) -> SendableRBStream {
-        let scan = match self.scan_builder().with_predicate(predicate).build() {
+        let scan = match self.scan_builder().with_predicate(predicate).with_skip_stats(true).build() {
             Ok(scan) => scan,
             Err(err) => return Box::pin(once(ready(Err(err)))),
         };
