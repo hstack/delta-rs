@@ -12,10 +12,13 @@ use tracing::debug;
 use url::Url;
 
 use super::normalize_table_url;
+use crate::kernel::StructType;
 use crate::logstore::storage::IORuntime;
 use crate::logstore::{LogStoreRef, StorageConfig, object_store_factories};
 use crate::{DeltaResult, DeltaTable, DeltaTableError};
 use crate::kernel::size_limits::LogSizeLimiter;
+use arrow::datatypes::Schema as ArrowSchema;
+use delta_kernel::engine::arrow_conversion::TryIntoKernel;
 
 /// possible version specifications for loading a delta table
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
@@ -60,6 +63,11 @@ pub struct DeltaTableConfig {
 
     #[delta(skip)]
     pub log_size_limiter: Option<LogSizeLimiter>,
+
+    #[serde(skip_serializing, skip_deserializing)]
+    #[delta(skip)]
+    /// Optional custom schema to use instead of loading from table metadata
+    pub custom_schema: Option<Arc<StructType>>,
 }
 
 impl Default for DeltaTableConfig {
@@ -70,6 +78,7 @@ impl Default for DeltaTableConfig {
             log_batch_size: 1024,
             io_runtime: None,
             log_size_limiter: None,
+            custom_schema: None,
         }
     }
 }
@@ -80,6 +89,11 @@ impl PartialEq for DeltaTableConfig {
             && self.log_buffer_size == other.log_buffer_size
             && self.log_batch_size == other.log_batch_size
             && self.log_size_limiter == other.log_size_limiter
+            && match (&self.custom_schema, &other.custom_schema) {
+                (Some(a), Some(b)) => Arc::ptr_eq(a, b) || a == b,
+                (None, None) => true,
+                _ => false,
+            }
     }
 }
 
@@ -248,6 +262,28 @@ impl DeltaTableBuilder {
     pub fn with_io_runtime(mut self, io_runtime: IORuntime) -> Self {
         self.table_config.io_runtime = Some(io_runtime);
         self
+    }
+
+    /// Set a custom schema to merge with the one from table metadata
+    ///
+    /// This allows you to override some of the schema that would normally be read
+    /// from the Delta log. This can be useful when you want to work with a subset
+    /// of columns or apply custom schema transformations.
+    ///
+    pub fn with_schema(mut self, schema: Arc<StructType>) -> Self {
+        self.table_config.custom_schema = Some(schema);
+        self
+    }
+
+    /// Set a custom schema from an Arrow schema to merge with the one from table metadata
+    ///
+    /// This is a convenience method that converts an Arrow schema to a Delta schema
+    /// and then sets it as the custom schema. This allows you to override the schema
+    /// that would normally be read from the Delta log using an Arrow schema.
+    ///
+    pub fn with_arrow_schema(self, arrow_schema: Arc<ArrowSchema>) -> DeltaResult<Self> {
+        let delta_schema: StructType = arrow_schema.as_ref().try_into_kernel()?;
+        Ok(self.with_schema(Arc::new(delta_schema)))
     }
 
     /// Storage options for configuring backend object store
@@ -735,5 +771,143 @@ mod tests {
         }
 
         std::fs::remove_dir_all(&test_dir).ok();
+    }
+
+    #[test]
+    fn test_with_schema() -> DeltaResult<()> {
+        use crate::kernel::{DataType, PrimitiveType, StructField};
+
+        let schema = StructType::try_new(vec![
+            StructField::new("id", DataType::Primitive(PrimitiveType::Integer), false),
+            StructField::new("name", DataType::Primitive(PrimitiveType::String), true),
+        ])?;
+
+        let table_url = Url::parse("memory:///test").unwrap();
+        let builder = DeltaTableBuilder::from_url(table_url)?
+            .with_schema(Arc::new(schema.clone()));
+
+        // Verify the schema is set in the config
+        assert!(builder.table_config.custom_schema.is_some());
+        let custom_schema = builder.table_config.custom_schema.as_ref().unwrap();
+        assert_eq!(custom_schema.fields().len(), 2);
+        assert_eq!(custom_schema.fields().next().unwrap().name(), "id");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_with_schema_integration() -> DeltaResult<()> {
+        use crate::kernel::{DataType, PrimitiveType, StructField};
+        use crate::operations::create::CreateBuilder;
+
+        // First create a table with a full schema
+        let full_schema = StructType::try_new(vec![
+            StructField::new("id", DataType::Primitive(PrimitiveType::Integer), false),
+            StructField::new("name", DataType::Primitive(PrimitiveType::String), true),
+            StructField::new("age", DataType::Primitive(PrimitiveType::Integer), true),
+        ])?;
+
+        let table = CreateBuilder::new()
+            .with_location("memory:///test_custom_schema")
+            .with_columns(full_schema.fields().cloned())
+            .await?;
+
+        // Verify the table was created with the full schema
+        let snapshot = table.snapshot()?;
+        assert_eq!(snapshot.schema().fields().len(), 3);
+
+        // Now load the table with a custom schema (subset of columns)
+        let custom_schema = StructType::try_new(vec![
+            StructField::new("id", DataType::Primitive(PrimitiveType::Integer), false),
+            StructField::new("name", DataType::Primitive(PrimitiveType::String), true),
+        ])?;
+
+        let table_url = Url::parse("memory:///test_custom_schema").unwrap();
+        let table_with_custom = DeltaTableBuilder::from_url(table_url)?
+            .with_schema(Arc::new(custom_schema.clone()))
+            .build()?;
+
+        // The table should have the custom schema in its config
+        assert!(table_with_custom.config.custom_schema.is_some());
+        let config_schema = table_with_custom.config.custom_schema.as_ref().unwrap();
+        assert_eq!(config_schema.fields().len(), 2);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_with_arrow_schema() -> DeltaResult<()> {
+        use arrow::datatypes::{DataType as ArrowDataType, Field as ArrowField};
+        use crate::kernel::{DataType, PrimitiveType, StructField};
+        use crate::operations::create::CreateBuilder;
+
+        // First create a table with a full schema
+        let full_schema = StructType::try_new(vec![
+            StructField::new("id", DataType::Primitive(PrimitiveType::Integer), false),
+            StructField::new("name", DataType::Primitive(PrimitiveType::String), true),
+            StructField::new("age", DataType::Primitive(PrimitiveType::Integer), true),
+        ])?;
+
+        let table = CreateBuilder::new()
+            .with_location("memory:///test_arrow_schema")
+            .with_columns(full_schema.fields().cloned())
+            .await?;
+
+        // Verify the table was created with the full schema
+        let snapshot = table.snapshot()?;
+        assert_eq!(snapshot.schema().fields().len(), 3);
+
+        // Now load the table with a custom Arrow schema (subset of columns)
+        let arrow_schema = ArrowSchema::new(vec![
+            ArrowField::new("id", ArrowDataType::Int32, false),
+            ArrowField::new("name", ArrowDataType::Utf8, true),
+        ]);
+
+        let table_url = Url::parse("memory:///test_arrow_schema").unwrap();
+        let table_with_custom = DeltaTableBuilder::from_url(table_url)?
+            .with_arrow_schema(Arc::new(arrow_schema))?
+            .build()?;
+
+        // The table should have the custom schema in its config
+        assert!(table_with_custom.config.custom_schema.is_some());
+        let config_schema = table_with_custom.config.custom_schema.as_ref().unwrap();
+        assert_eq!(config_schema.fields().len(), 2);
+
+        // Verify the field names match
+        let field_names: Vec<&str> = config_schema.fields()
+            .map(|f| f.name().as_str())
+            .collect();
+        assert_eq!(field_names, vec!["id", "name"]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_with_arrow_schema_conversion() -> DeltaResult<()> {
+        use arrow::datatypes::{DataType as ArrowDataType, Field as ArrowField};
+
+        // Create an Arrow schema
+        let arrow_schema = ArrowSchema::new(vec![
+            ArrowField::new("id", ArrowDataType::Int32, false),
+            ArrowField::new("name", ArrowDataType::Utf8, true),
+            ArrowField::new("value", ArrowDataType::Float64, true),
+        ]);
+
+        let table_url = Url::parse("memory:///test_conversion").unwrap();
+        let builder = DeltaTableBuilder::from_url(table_url)?
+            .with_arrow_schema(Arc::new(arrow_schema))?;
+
+        // Verify the schema was converted and set
+        assert!(builder.table_config.custom_schema.is_some());
+        let delta_schema = builder.table_config.custom_schema.as_ref().unwrap();
+        assert_eq!(delta_schema.fields().len(), 3);
+
+        // Verify field names
+        let field_names: Vec<&str> = delta_schema.fields()
+            .map(|f| f.name().as_str())
+            .collect();
+        assert_eq!(field_names, vec!["id", "name", "value"]);
+
+        Ok(())
     }
 }
