@@ -25,8 +25,10 @@ use datafusion_proto::bytes::{
 };
 use deltalake_core::DeltaTableBuilder;
 use deltalake_core::delta_datafusion::{
-    DeltaScan, DeltaScanConfigBuilder, DeltaTableFactory, DeltaTableProvider,
+    DeltaScan, DeltaScanBuilder, DeltaScanConfig, DeltaScanConfigBuilder, DeltaTableFactory,
+    DeltaTableProvider,
 };
+use deltalake_core::logstore::LogStore;
 use deltalake_core::kernel::{
     ColumnMetadataKey, DataType, MapType, MetadataValue, PrimitiveType, StructField, StructType,
 };
@@ -2192,10 +2194,12 @@ mod insert_into_tests {
 
 mod deep {
     use std::collections::HashMap;
+    use std::collections::HashSet;
     use std::ops::Deref;
     use std::sync::Arc;
     use arrow_cast::display::FormatOptions;
     use arrow_cast::pretty;
+    use arrow_schema::{DataType as ArrowDataType, Field as ArrowField, Schema as ArrowSchema};
     use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
     use datafusion::datasource::physical_plan::ParquetSource;
     use datafusion::optimizer::optimize_projections_deep::DeepColumnIndexMap;
@@ -2208,7 +2212,8 @@ mod deep {
     use datafusion_proto::protobuf::PhysicalPlanNode;
     use prost::Message;
     use tracing::info;
-    use deltalake_core::delta_datafusion::{DeltaNextPhysicalCodec, DeltaPhysicalCodec, DeltaScanExec};
+    use deltalake_core::delta_datafusion::{DataFusionMixins, DeltaNextPhysicalCodec, DeltaPhysicalCodec, DeltaScanBuilder, DeltaScanConfig, DeltaScanExec};
+    use deltalake_core::logstore::LogStore;
     use deltalake_core::delta_datafusion::table_provider_old::DeltaTableOldProvider;
     use deltalake_core::delta_datafusion::udtf::register_delta_table_udtf;
 
@@ -2476,6 +2481,107 @@ mod deep {
         Ok(())
     }
 
+    /// Verify that deep projection (struct sub-field pruning) and virtual columns
+    /// can be active at the same time:
+    ///   - the virtual column is null-filled in every output row
+    ///   - the struct column is read with only the requested sub-field (deep projection)
+    ///
+    /// NOTE: this test places `virtual_col` *after* the struct column so that its
+    /// logical index (3) and the struct column's physical-file index (2) are the
+    /// same.  If a virtual column were inserted *before* the struct column, the
+    /// logical index used as the key in `projection_deep` would differ from the
+    /// physical-file index, requiring an explicit remapping — which is currently
+    /// not implemented in `DeltaScanBuilder`.
+    #[tokio::test]
+    async fn test_virtual_columns_with_deep_projection() -> datafusion::common::Result<()> {
+        use deltalake_core::DeltaTableBuilder;
+        let delta_path = format!("{}/tests/data/deep", env!("CARGO_MANIFEST_DIR"));
+        let url = url::Url::from_directory_path(
+            std::path::Path::new(&delta_path).canonicalize().unwrap()
+        ).unwrap();
+        let table = DeltaTableBuilder::from_url(url).unwrap().load().await.unwrap();
+        let snapshot = table.snapshot().unwrap().snapshot().clone();
+        let log_store = table.log_store();
+
+        // The physical file schema for this table (non-partition columns):
+        //   0: _acp_system_metadata  (struct)
+        //   1: _id                   (string)
+        //   2: productListItems      (array<struct>)
+        //
+        // We append virtual_col at index 3 so productListItems keeps index 2 in
+        // both the logical schema and the physical file schema.
+        let read_schema = snapshot.read_schema();
+        let mut fields: Vec<ArrowField> =
+            read_schema.fields().iter().map(|f| f.as_ref().clone()).collect();
+        fields.push(ArrowField::new("virtual_col", ArrowDataType::Int64, true));
+        let schema_with_virtual = Arc::new(ArrowSchema::new(fields));
+
+        // Logical schema indices (non-partition, virtual appended at end):
+        //   0: _acp_system_metadata, 1: _id, 2: productListItems, 3: virtual_col
+        // Request _id (1), productListItems (2), virtual_col (3).
+        let projection = vec![1usize, 2, 3];
+
+        // Deep projection: for productListItems (logical AND physical index 2) read only SKU.
+        // With file_projection = Some([1, 2]) the key 2 here is the physical file index of
+        // productListItems, which matches because virtual_col is appended after the physical cols.
+        let mut projection_deep = HashMap::new();
+        projection_deep.insert(2usize, vec!["SKU".to_string()]);
+
+        // virtual_col is auto-detected by DeltaScanBuilder: it is present in
+        // schema_with_virtual but absent from the physical table schema.
+        let config = DeltaScanConfig::new()
+            .with_schema(schema_with_virtual.clone())
+            .with_requested_columns(vec![
+                "_id".to_string(),
+                "productListItems".to_string(),
+                "virtual_col".to_string(),
+            ]);
+
+        let ctx = SessionContext::new();
+        // Register the object store under the delta-rs:// URL that FileScanConfig uses.
+        // This mirrors what DeltaTableProvider::scan_with_args does via ensure_log_store_registered.
+        let object_store_url = log_store.object_store_url();
+        ctx.runtime_env()
+            .register_object_store(object_store_url.as_ref(), log_store.object_store(None));
+
+        let scan = DeltaScanBuilder::new(&snapshot, log_store, &ctx.state())
+            .with_scan_config(config)
+            .with_projection(Some(&projection))
+            .with_projection_deep(Some(&projection_deep))
+            .build()
+            .await?;
+
+        // Output schema must contain virtual_col
+        let output_schema = scan.schema();
+        assert!(
+            output_schema.field_with_name("virtual_col").is_ok(),
+            "virtual_col missing from output schema"
+        );
+
+        let batches = collect(Arc::new(scan), ctx.task_ctx()).await?;
+        let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert!(total_rows > 0, "expected rows from the deep fixture");
+
+        for batch in &batches {
+            // virtual_col must be entirely null — this is the key invariant we protect
+            let vc_idx = batch.schema().index_of("virtual_col").unwrap();
+            let vc_col = batch.column(vc_idx);
+            assert_eq!(
+                vc_col.null_count(),
+                vc_col.len(),
+                "virtual_col should be entirely null"
+            );
+
+            // productListItems must be present (scan did not crash due to index confusion)
+            assert!(
+                batch.schema().index_of("productListItems").is_ok(),
+                "productListItems missing from output"
+            );
+        }
+
+        Ok(())
+    }
+
     fn find_exec_node<T: ExecutionPlan + 'static>(input: &Arc<dyn ExecutionPlan>) -> Option<&T> {
         if let Some(found) = input.as_any().downcast_ref::<T>() {
             Some(found)
@@ -2485,5 +2591,266 @@ mod deep {
         }
     }
 
+}
+
+mod virtual_columns {
+    use super::*;
+    use datafusion::physical_plan::collect;
+
+    /// Create a small Delta table with three physical columns:
+    ///   - `id`    Int32 (non-nullable)
+    ///   - `value` Utf8  (non-nullable)
+    ///   - `info`  Struct<name: Utf8> (nullable)
+    ///
+    /// Three rows: (1, "a", {alice}), (2, "b", {bob}), (3, "c", {carol}).
+    /// All virtual-column tests share this fixture so that both flat and struct
+    /// scenarios can be exercised without separate table helpers.
+    async fn create_test_virtual_column_table() -> (tempfile::TempDir, DeltaTable) {
+        use arrow::array::StructArray;
+
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let table_uri = tmp_dir.path().to_str().unwrap().to_string();
+
+        let table = DeltaTable::try_from_url(ensure_table_uri(table_uri).unwrap())
+            .await
+            .unwrap()
+            .create()
+            .with_column("id", DataType::Primitive(PrimitiveType::Integer), false, None)
+            .with_column("value", DataType::Primitive(PrimitiveType::String), false, None)
+            .with_column(
+                "info",
+                DataType::Struct(Box::new(
+                    StructType::try_new(vec![StructField::new(
+                        "name",
+                        DataType::Primitive(PrimitiveType::String),
+                        true,
+                    )])
+                    .unwrap(),
+                )),
+                true,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let name_field = Arc::new(ArrowField::new("name", ArrowDataType::Utf8, true));
+        let name_arr =
+            Arc::new(StringArray::from(vec![Some("alice"), Some("bob"), Some("carol")])) as ArrayRef;
+        let struct_arr = Arc::new(StructArray::from(vec![(name_field, name_arr)])) as ArrayRef;
+
+        let batch = RecordBatch::try_from_iter_with_nullable(vec![
+            ("id", Arc::new(Int32Array::from(vec![1, 2, 3])) as ArrayRef, false),
+            ("value", Arc::new(StringArray::from(vec!["a", "b", "c"])) as ArrayRef, false),
+            ("info", struct_arr, true),
+        ])
+        .unwrap();
+
+        let table = table.write(vec![batch]).await.unwrap();
+        (tmp_dir, table)
+    }
+
+    /// Virtual columns should be null-filled in the scan output; physical columns
+    /// retain their data.
+    #[tokio::test]
+    async fn test_virtual_columns_are_null_filled() -> Result<()> {
+        let (_dir, table) = create_test_virtual_column_table().await;
+
+        let schema_with_virtual = Arc::new(ArrowSchema::new(vec![
+            ArrowField::new("id", ArrowDataType::Int32, false),
+            ArrowField::new("value", ArrowDataType::Utf8, false),
+            ArrowField::new("virtual_col", ArrowDataType::Int64, true),
+        ]));
+
+        let config = DeltaScanConfig::new()
+            .with_schema(schema_with_virtual)
+            .with_requested_columns(vec![
+                "id".to_string(),
+                "value".to_string(),
+                "virtual_col".to_string(),
+            ]);
+
+        let ctx = SessionContext::new();
+        let snapshot = table.snapshot().unwrap().snapshot().clone();
+        let log_store = table.log_store();
+
+        let object_store_url = log_store.object_store_url();
+        ctx.runtime_env()
+            .register_object_store(object_store_url.as_ref(), log_store.object_store(None));
+
+        let scan = DeltaScanBuilder::new(&snapshot, log_store, &ctx.state())
+            .with_scan_config(config)
+            .build()
+            .await?;
+
+        let batches = collect(Arc::new(scan), ctx.task_ctx()).await?;
+
+        assert_batches_sorted_eq!(
+            &[
+                "+----+-------+-------------+",
+                "| id | value | virtual_col |",
+                "+----+-------+-------------+",
+                "| 1  | a     |             |",
+                "| 2  | b     |             |",
+                "| 3  | c     |             |",
+                "+----+-------+-------------+",
+            ],
+            &batches
+        );
+        Ok(())
+    }
+
+    /// When ALL requested columns are virtual, the scan should still produce the
+    /// correct number of rows (driven by a single physical column internally)
+    /// and return them all as null.
+    #[tokio::test]
+    async fn test_all_requested_columns_virtual_produces_correct_row_count() -> Result<()> {
+        let (_dir, table) = create_test_virtual_column_table().await;
+
+        let schema_with_virtual = Arc::new(ArrowSchema::new(vec![
+            ArrowField::new("id", ArrowDataType::Int32, false),
+            ArrowField::new("value", ArrowDataType::Utf8, false),
+            ArrowField::new("virtual_col", ArrowDataType::Int64, true),
+        ]));
+
+        let config = DeltaScanConfig::new()
+            .with_schema(schema_with_virtual)
+            .with_requested_columns(vec!["virtual_col".to_string()]);
+
+        let ctx = SessionContext::new();
+        let snapshot = table.snapshot().unwrap().snapshot().clone();
+        let log_store = table.log_store();
+
+        let object_store_url = log_store.object_store_url();
+        ctx.runtime_env()
+            .register_object_store(object_store_url.as_ref(), log_store.object_store(None));
+
+        let scan = DeltaScanBuilder::new(&snapshot, log_store, &ctx.state())
+            .with_scan_config(config)
+            .build()
+            .await?;
+
+        let batches = collect(Arc::new(scan), ctx.task_ctx()).await?;
+
+        assert_batches_sorted_eq!(
+            &[
+                "+-------------+",
+                "| virtual_col |",
+                "+-------------+",
+                "|             |",
+                "|             |",
+                "|             |",
+                "+-------------+",
+            ],
+            &batches
+        );
+        Ok(())
+    }
+
+    /// When virtual columns appear first in `requested_columns`, the output
+    /// schema and data ordering must respect that sequence.
+    #[tokio::test]
+    async fn test_virtual_columns_requested_column_ordering() -> Result<()> {
+        let (_dir, table) = create_test_virtual_column_table().await;
+
+        let schema_with_virtual = Arc::new(ArrowSchema::new(vec![
+            ArrowField::new("id", ArrowDataType::Int32, false),
+            ArrowField::new("value", ArrowDataType::Utf8, false),
+            ArrowField::new("virtual_col", ArrowDataType::Int64, true),
+        ]));
+
+        let config = DeltaScanConfig::new()
+            .with_schema(schema_with_virtual)
+            .with_requested_columns(vec![
+                "virtual_col".to_string(),
+                "id".to_string(),
+            ]);
+
+        let ctx = SessionContext::new();
+        let snapshot = table.snapshot().unwrap().snapshot().clone();
+        let log_store = table.log_store();
+
+        let object_store_url = log_store.object_store_url();
+        ctx.runtime_env()
+            .register_object_store(object_store_url.as_ref(), log_store.object_store(None));
+
+        let scan = DeltaScanBuilder::new(&snapshot, log_store, &ctx.state())
+            .with_scan_config(config)
+            .build()
+            .await?;
+
+        let batches = collect(Arc::new(scan), ctx.task_ctx()).await?;
+
+        assert_batches_sorted_eq!(
+            &[
+                "+-------------+----+",
+                "| virtual_col | id |",
+                "+-------------+----+",
+                "|             | 1  |",
+                "|             | 2  |",
+                "|             | 3  |",
+                "+-------------+----+",
+            ],
+            &batches
+        );
+        Ok(())
+    }
+
+    /// Adding a new nullable sub-field to an existing struct column in the extended schema
+    /// is handled transparently by Arrow's parquet reader via schema evolution — no changes
+    /// to the virtual column machinery are required.
+    /// The physical file has `info: Struct<name: Utf8>`; the extended schema declares
+    /// `info: Struct<name: Utf8, score: Int32>` where `score` does not exist in the file.
+    /// The parquet reader fills the missing sub-field with nulls automatically.
+    #[tokio::test]
+    async fn test_virtual_sub_field_in_existing_struct() -> Result<()> {
+        use arrow_schema::Fields;
+
+        let (_dir, table) = create_test_virtual_column_table().await;
+
+        // Extended schema: info gains a new nullable sub-field `score`
+        let extended_schema = Arc::new(ArrowSchema::new(vec![
+            ArrowField::new("id", ArrowDataType::Int32, false),
+            ArrowField::new(
+                "info",
+                ArrowDataType::Struct(Fields::from(vec![
+                    ArrowField::new("name", ArrowDataType::Utf8, true),
+                    ArrowField::new("score", ArrowDataType::Int32, true),
+                ])),
+                true,
+            ),
+        ]));
+
+        let config = DeltaScanConfig::new().with_schema(extended_schema);
+
+        let ctx = SessionContext::new();
+        let snapshot = table.snapshot().unwrap().snapshot().clone();
+        let log_store = table.log_store();
+        ctx.runtime_env()
+            .register_object_store(log_store.object_store_url().as_ref(), log_store.object_store(None));
+
+        let scan = DeltaScanBuilder::new(&snapshot, log_store, &ctx.state())
+            .with_scan_config(config)
+            .build()
+            .await?;
+
+        let batches = collect(Arc::new(scan), ctx.task_ctx()).await?;
+        let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total_rows, 3);
+
+        // `info.name` should be populated; `info.score` should be null (schema evolution)
+        assert_batches_sorted_eq!(
+            &[
+                "+----+------------------------+",
+                "| id | info                   |",
+                "+----+------------------------+",
+                "| 1  | {name: alice, score: } |",
+                "| 2  | {name: bob, score: }   |",
+                "| 3  | {name: carol, score: } |",
+                "+----+------------------------+",
+            ],
+            &batches
+        );
+        Ok(())
+    }
 }
 
