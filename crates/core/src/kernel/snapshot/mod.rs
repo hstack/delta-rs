@@ -550,13 +550,11 @@ pub(crate) async fn resolve_snapshot(
     }
 }
 
-fn read_adds_size(array: &dyn ProvidesColumnByName) -> DeltaResult<usize> {
-    if let Some(arr) = ex::extract_and_cast_opt::<StructArray>(array, "add") {
-        let size = ex::extract_and_cast::<Int64Array>(arr, "size")?;
-        let sum = sum_array_checked::<arrow::array::types::Int64Type, _>(size)?.unwrap_or_default();
-        Ok(sum as usize)
+fn read_adds_size(array: &dyn ProvidesColumnByName) -> usize {
+    if let Some(size) = ex::extract_and_cast_opt::<Int64Array>(array, "size") {
+        sum_array_checked::<arrow::array::types::Int64Type, _>(size).unwrap().unwrap_or_default() as usize
     } else {
-        Ok(0)
+        0
     }
 }
 
@@ -716,7 +714,7 @@ impl EagerSnapshot {
         self
             .files
             .iter()
-            .map(|frb| read_adds_size(frb).unwrap_or_default())
+            .map(|frb| read_adds_size(frb))
             .sum()
     }
 
