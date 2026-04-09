@@ -270,6 +270,11 @@ impl Snapshot {
         log_store: &dyn LogStore,
         predicate: Option<PredicateRef>,
     ) -> SendableRBStream {
+        // NOTE: skip_stats avoids deserializing per-column min/max/nullCount from checkpoints,
+        // which is a major speedup for wide tables. Trade-off: stats_parsed (including numRecords)
+        // will be absent, so downstream limit-based file pruning becomes a no-op — all files are
+        // included and the limit is enforced at scan time instead. If a future kernel version
+        // supports skipping per-column stats while preserving numRecords, this can be revisited.
         let scan = match self.scan_builder().with_predicate(predicate).with_skip_stats(true).build() {
             Ok(scan) => scan,
             Err(err) => return Box::pin(once(ready(Err(err)))),

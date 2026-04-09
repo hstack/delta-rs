@@ -424,6 +424,10 @@ impl<'a> DeltaScanBuilder<'a> {
                     // rust port of https://github.com/delta-io/delta/pull/1495
 
                     // Phase 1: partition kept files into with-stats and without-stats
+                    // NOTE: when skip_stats is enabled (the default for EagerSnapshot),
+                    // num_records() is always None and all files land in without_stats,
+                    // effectively disabling limit-based file pruning. This is by design —
+                    // see Snapshot::files() for rationale.
                     let mut with_stats = Vec::new();
                     let mut without_stats = Vec::new();
 
