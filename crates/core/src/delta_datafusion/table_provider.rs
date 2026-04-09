@@ -457,7 +457,11 @@ impl<'a> DeltaScanBuilder<'a> {
                             if rows_collected > limit as i64 {
                                 break;
                             }
-                            rows_collected += num_records.unwrap_or(0) as i64;
+                            // Safety: when limit is set, phase 1 routes all None-stats
+                            // files to `without_stats`, so num_records is always Some here.
+                            rows_collected += num_records
+                                .expect("with_stats entries always have num_records when limit is set")
+                                as i64;
                             files.push(action);
                         }
                         // fallback: include files without stats if we didn't reach the limit
