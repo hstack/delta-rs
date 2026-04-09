@@ -21,7 +21,7 @@ use arrow::array::RecordBatch;
 use arrow::compute::{filter_record_batch, is_not_null};
 use arrow::datatypes::SchemaRef;
 use arrow_arith::aggregate::sum_array_checked;
-use arrow_array::{Int64Array, StructArray};
+use arrow_array::Int64Array;
 use delta_kernel::actions::{Remove, Sidecar};
 use delta_kernel::engine::arrow_conversion::TryIntoArrow as _;
 use delta_kernel::engine::arrow_data::ArrowEngineData;
@@ -552,7 +552,11 @@ pub(crate) async fn resolve_snapshot(
 
 fn read_adds_size(array: &dyn ProvidesColumnByName) -> usize {
     if let Some(size) = ex::extract_and_cast_opt::<Int64Array>(array, "size") {
-        sum_array_checked::<arrow::array::types::Int64Type, _>(size).unwrap().unwrap_or_default() as usize
+        sum_array_checked::<arrow::array::types::Int64Type, _>(size)
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+            .max(0) as usize
     } else {
         0
     }
