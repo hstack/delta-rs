@@ -422,51 +422,47 @@ impl<'a> DeltaScanBuilder<'a> {
 
                     // needed to enforce limit and deal with missing statistics
                     // rust port of https://github.com/delta-io/delta/pull/1495
-                    let mut pruned_without_stats = Vec::new();
-                    let mut rows_collected = 0;
-                    let mut files = Vec::with_capacity(num_containers);
 
-                    use rand::seq::SliceRandom;
-
-                    let mut indices = (0..num_containers).collect::<Vec<_>>();
-                    if self.limit.is_some() && std::env::var("DELTA_RS_SHUFFLE_FILES").is_ok() {
-                        let mut rng = rand::thread_rng();
-                        indices.shuffle(&mut rng);
-                    }
+                    // Phase 1: partition kept files into with-stats and without-stats
+                    let mut with_stats = Vec::new();
+                    let mut without_stats = Vec::new();
 
                     let log_data_handler = self.snapshot.log_data();
-                    for i in indices {
-                        let file_view = log_data_handler.get(i).unwrap();
-                        let keep = files_to_prune[i];
-
-                        // prune file based on predicate pushdown
+                    for (file_view, keep) in log_data_handler.iter().zip(files_to_prune.iter().copied()) {
+                        if !keep {
+                            continue;
+                        }
                         let action = file_view.add_action_no_stats();
-                        let num_records = file_view.num_records();
-                        if keep {
-                            // prune file based on limit pushdown
-                            if let Some(limit) = self.limit {
-                                if let Some(num_records) = num_records {
-                                    if rows_collected <= limit as i64 {
-                                        rows_collected += num_records as i64;
-                                        files.push(action.to_owned());
-                                    } else {
-                                        break;
-                                    }
-                                } else {
-                                    // some files are missing stats; skipping but storing them
-                                    // in a list in case we can't reach the target limit
-                                    pruned_without_stats.push(action.to_owned());
-                                }
-                            } else {
-                                files.push(action.to_owned());
-                            }
+                        if self.limit.is_some() && file_view.num_records().is_none() {
+                            without_stats.push(action.to_owned());
+                        } else {
+                            with_stats.push((action.to_owned(), file_view.num_records()));
                         }
                     }
 
-                    if let Some(limit) = self.limit
-                        && rows_collected < limit as i64
-                    {
-                        files.extend(pruned_without_stats);
+                    // Phase 2: optionally shuffle, then apply limit
+                    if self.limit.is_some() && std::env::var("DELTA_RS_SHUFFLE_FILES").is_ok() {
+                        use rand::seq::SliceRandom;
+                        with_stats.shuffle(&mut rand::thread_rng());
+                    }
+
+                    let mut files = Vec::with_capacity(num_containers);
+                    let mut rows_collected: i64 = 0;
+
+                    if let Some(limit) = self.limit {
+                        for (action, num_records) in with_stats {
+                            if rows_collected > limit as i64 {
+                                break;
+                            }
+                            rows_collected += num_records.unwrap_or(0) as i64;
+                            files.push(action);
+                        }
+                        // fallback: include files without stats if we didn't reach the limit
+                        if rows_collected < limit as i64 {
+                            files.extend(without_stats);
+                        }
+                    } else {
+                        files.extend(with_stats.into_iter().map(|(action, _)| action));
                     }
 
                     let files_scanned = files.len();
