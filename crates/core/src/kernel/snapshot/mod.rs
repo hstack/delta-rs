@@ -295,6 +295,7 @@ impl Snapshot {
         existing_data: Box<T>,
         existing_predicate: Option<PredicateRef>,
     ) -> SendableRBStream {
+        // TODO: consider adding .with_skip_stats(true) here for consistency with files()
         let scan = match self.scan_builder().with_predicate(predicate).build() {
             Ok(scan) => scan,
             Err(err) => return Box::pin(once(ready(Err(err)))),
@@ -550,6 +551,8 @@ pub(crate) async fn resolve_snapshot(
     }
 }
 
+// NOTE: reads "size" as a top-level column — this assumes `array` is a scan-output
+// batch (where fields are flattened), not a raw log action batch (where it would be `add.size`).
 fn read_adds_size(array: &dyn ProvidesColumnByName) -> usize {
     if let Some(size) = ex::extract_and_cast_opt::<Int64Array>(array, "size") {
         sum_array_checked::<arrow::array::types::Int64Type, _>(size)

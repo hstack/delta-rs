@@ -441,6 +441,9 @@ impl<'a> DeltaScanBuilder<'a> {
                     }
 
                     // Phase 2: optionally shuffle, then apply limit
+                    // TODO: DELTA_RS_SHUFFLE_FILES is a blunt env-var toggle (any value enables it,
+                    // including "0"/"false"). Consider a proper config flag and optional seed for
+                    // reproducibility.
                     if self.limit.is_some() && std::env::var("DELTA_RS_SHUFFLE_FILES").is_ok() {
                         use rand::seq::SliceRandom;
                         with_stats.shuffle(&mut rand::thread_rng());
