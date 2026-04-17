@@ -426,12 +426,13 @@ impl<'a> DeltaScanBuilder<'a> {
                     let mut rows_collected = 0;
                     let mut files = Vec::with_capacity(num_containers);
 
+                    // TODO: DELTA_RS_SHUFFLE_FILES is a blunt env-var toggle (any value enables it,
+                    // including "0"/"false"). Consider a proper config flag and optional seed for
+                    // reproducibility.
                     use rand::seq::SliceRandom;
-
                     let mut indices = (0..num_containers).collect::<Vec<_>>();
                     if self.limit.is_some() && std::env::var("DELTA_RS_SHUFFLE_FILES").is_ok() {
-                        let mut rng = rand::thread_rng();
-                        indices.shuffle(&mut rng);
+                        indices.shuffle(&mut rand::thread_rng());
                     }
 
                     let log_data_handler = self.snapshot.log_data();

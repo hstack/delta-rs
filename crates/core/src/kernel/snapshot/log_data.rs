@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use arrow_array::RecordBatch;
 use delta_kernel::actions::{Metadata, Protocol};
@@ -59,11 +59,28 @@ impl<T: PartitionsExt> PartitionsExt for Arc<T> {
 pub struct LogDataHandler<'a> {
     data: &'a [RecordBatch],
     config: &'a TableConfiguration,
+    cumulative_rows: OnceLock<Vec<usize>>,
 }
 
 impl<'a> LogDataHandler<'a> {
     pub(crate) fn new(data: &'a [RecordBatch], config: &'a TableConfiguration) -> Self {
-        Self { data, config }
+        Self {
+            data,
+            config,
+            cumulative_rows: OnceLock::new(),
+        }
+    }
+
+    fn cumulative_rows(&self) -> &Vec<usize> {
+        self.cumulative_rows.get_or_init(|| {
+            let mut cumulative_rows = Vec::with_capacity(self.data.len());
+            let mut total = 0;
+            for batch in self.data {
+                cumulative_rows.push(total);
+                total += batch.num_rows();
+            }
+            cumulative_rows
+        })
     }
 
     pub(crate) fn table_configuration(&self) -> &TableConfiguration {
@@ -87,14 +104,16 @@ impl<'a> LogDataHandler<'a> {
         self.data.iter().map(|batch| batch.num_rows()).sum()
     }
 
-    pub fn get(&self, mut index: usize) -> Option<LogicalFileView> {
-        for batch in self.data {
-            if index < batch.num_rows() {
-                return Some(LogicalFileView::new(batch.clone(), index));
-            }
-            index -= batch.num_rows();
+    pub fn get(&self, index: usize) -> Option<LogicalFileView> {
+        let cumulative_rows = self.cumulative_rows();
+        let batch_idx = cumulative_rows.partition_point(|&start| start <= index);
+        if batch_idx == 0 {
+            return None;
         }
-        None
+        let batch_idx = batch_idx - 1;
+        let local_idx = index - cumulative_rows[batch_idx];
+        let batch = &self.data[batch_idx];
+        (local_idx < batch.num_rows()).then(|| LogicalFileView::new(batch.clone(), local_idx))
     }
 
     pub fn iter(&self) -> impl Iterator<Item = LogicalFileView> + '_ {
