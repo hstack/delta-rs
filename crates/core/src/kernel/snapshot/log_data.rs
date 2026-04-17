@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use arrow_array::RecordBatch;
 use delta_kernel::actions::{Metadata, Protocol};
@@ -59,23 +59,28 @@ impl<T: PartitionsExt> PartitionsExt for Arc<T> {
 pub struct LogDataHandler<'a> {
     data: &'a [RecordBatch],
     config: &'a TableConfiguration,
-    /// cumulative_rows[i] = total rows in data[0..i]
-    cumulative_rows: Vec<usize>,
+    cumulative_rows: OnceLock<Vec<usize>>,
 }
 
 impl<'a> LogDataHandler<'a> {
     pub(crate) fn new(data: &'a [RecordBatch], config: &'a TableConfiguration) -> Self {
-        let mut cumulative_rows = Vec::with_capacity(data.len());
-        let mut total = 0;
-        for batch in data {
-            cumulative_rows.push(total);
-            total += batch.num_rows();
-        }
         Self {
             data,
             config,
-            cumulative_rows,
+            cumulative_rows: OnceLock::new(),
         }
+    }
+
+    fn cumulative_rows(&self) -> &Vec<usize> {
+        self.cumulative_rows.get_or_init(|| {
+            let mut cumulative_rows = Vec::with_capacity(self.data.len());
+            let mut total = 0;
+            for batch in self.data {
+                cumulative_rows.push(total);
+                total += batch.num_rows();
+            }
+            cumulative_rows
+        })
     }
 
     pub(crate) fn table_configuration(&self) -> &TableConfiguration {
@@ -100,12 +105,13 @@ impl<'a> LogDataHandler<'a> {
     }
 
     pub fn get(&self, index: usize) -> Option<LogicalFileView> {
-        let batch_idx = self.cumulative_rows.partition_point(|&start| start <= index);
+        let cumulative_rows = self.cumulative_rows();
+        let batch_idx = cumulative_rows.partition_point(|&start| start <= index);
         if batch_idx == 0 {
             return None;
         }
         let batch_idx = batch_idx - 1;
-        let local_idx = index - self.cumulative_rows[batch_idx];
+        let local_idx = index - cumulative_rows[batch_idx];
         let batch = &self.data[batch_idx];
         (local_idx < batch.num_rows()).then(|| LogicalFileView::new(batch.clone(), local_idx))
     }
