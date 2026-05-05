@@ -40,6 +40,7 @@ use datafusion::{
     physical_plan::ExecutionPlan,
 };
 use datafusion::catalog::{ScanArgs, ScanResult};
+use delta_kernel::Engine;
 use delta_kernel::table_configuration::TableConfiguration;
 use serde::{Deserialize, Serialize};
 
@@ -175,7 +176,9 @@ impl TableProvider for DeltaScan {
         filters: &[Expr],
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        let engine = DataFusionEngine::new_from_session(session);
+        let engine: Arc<dyn Engine> = self.snapshot.snapshot().config.engine.as_ref()
+            .map(|e| e.0.clone())
+            .unwrap_or_else(|| DataFusionEngine::new_from_session(session));
 
         // Filter out file_id column from projection if present
         let file_id_idx = self
@@ -218,7 +221,9 @@ impl TableProvider for DeltaScan {
     }
 
     async fn scan_with_args<'a>(&self, state: &dyn Session, args: ScanArgs<'a>) -> Result<ScanResult> {
-        let engine = DataFusionEngine::new_from_session(state);
+        let engine: Arc<dyn Engine> = self.snapshot.snapshot().config.engine.as_ref()
+            .map(|e| e.0.clone())
+            .unwrap_or_else(|| DataFusionEngine::new_from_session(state));
 
         // Filter out file_id column from projection if present
         let file_id_idx = self

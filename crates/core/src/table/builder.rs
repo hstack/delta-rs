@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 use tracing::debug;
 use url::Url;
 
+use delta_kernel::Engine;
+
 use super::normalize_table_url;
 use crate::logstore::storage::IORuntime;
 use crate::logstore::{LogStoreRef, StorageConfig, object_store_factories};
@@ -27,6 +29,16 @@ pub enum DeltaVersion {
     Version(i64),
     /// specify the timestamp in UTC
     Timestamp(DateTime<Utc>),
+}
+
+/// Wrapper around `Arc<dyn Engine>` that implements `Debug` and `Clone`.
+#[derive(Clone)]
+pub struct EngineRef(pub Arc<dyn Engine>);
+
+impl std::fmt::Debug for EngineRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "EngineRef(<engine>)")
+    }
 }
 
 /// Configuration options for delta table
@@ -61,6 +73,12 @@ pub struct DeltaTableConfig {
     #[delta(skip)]
     pub log_size_limiter: Option<LogSizeLimiter>,
 
+    /// Custom kernel engine to use for snapshot loading and scan operations.
+    /// When set, this engine is used instead of the default engine derived from the log store.
+    #[serde(skip_serializing, skip_deserializing)]
+    #[delta(skip)]
+    pub engine: Option<EngineRef>,
+
     /// HSTACK: skip stats parsing during file listing. Runtime-only (not persisted).
     /// Default `true` for performance; set to `false` when stats-based pruning helps the query.
     #[serde(skip_serializing, skip_deserializing)]
@@ -76,6 +94,7 @@ impl Default for DeltaTableConfig {
             log_batch_size: 1024,
             io_runtime: None,
             log_size_limiter: None,
+            engine: None,
             skip_stats_in_file_listing: true,
         }
     }
@@ -153,6 +172,12 @@ impl DeltaTableBuilder {
     /// Sets `log_size_limiter` to the builder
     pub fn with_log_size_limiter(mut self, limiter: LogSizeLimiter) -> Self {
         self.table_config.log_size_limiter = Some(limiter);
+        self
+    }
+
+    /// Sets a custom kernel `Engine` to use for snapshot loading and scan operations.
+        pub fn with_engine(mut self, engine: Arc<dyn Engine>) -> Self {
+        self.table_config.engine = Some(EngineRef(engine));
         self
     }
 
