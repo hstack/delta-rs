@@ -104,7 +104,7 @@ pub use self::schema::partitions::*;
 pub use self::schema::*;
 pub use self::table::DeltaTable;
 pub use self::table::builder::{
-    DeltaTableBuilder, DeltaTableConfig, DeltaVersion, ensure_table_uri,
+    DeltaTableBuilder, DeltaTableConfig, DeltaVersion, EngineRef, ensure_table_uri,
 };
 pub use self::table::config::TableProperty;
 pub use object_store::{Error as ObjectStoreError, ObjectMeta, ObjectStore, path::Path};
