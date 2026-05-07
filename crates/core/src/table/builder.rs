@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use chrono::{DateTime, FixedOffset, Utc};
+use delta_kernel::Engine;
 use deltalake_derive::DeltaConfig;
 use object_store::DynObjectStore;
 use serde::{Deserialize, Serialize};
@@ -28,6 +29,16 @@ pub enum DeltaVersion {
     Version(Version),
     /// specify the timestamp in UTC
     Timestamp(DateTime<Utc>),
+}
+
+/// Wrapper around `Arc<dyn Engine>` that implements `Debug` and `Clone`.
+#[derive(Clone)]
+pub struct EngineRef(pub Arc<dyn Engine>);
+
+impl std::fmt::Debug for EngineRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "EngineRef(<engine>)")
+    }
 }
 
 /// Configuration options for delta table
@@ -71,6 +82,11 @@ pub struct DeltaTableConfig {
     #[delta(skip)]
     pub log_size_limiter: Option<LogSizeLimiter>,
 
+    /// Custom kernel engine to use for snapshot loading and scan operations.
+    /// When set, this engine is used instead of the default engine derived from the log store.
+    #[serde(skip_serializing, skip_deserializing)]
+    #[delta(skip)]
+    pub engine: Option<EngineRef>,
 }
 
 impl Default for DeltaTableConfig {
@@ -82,6 +98,7 @@ impl Default for DeltaTableConfig {
             skip_stats: false,
             io_runtime: None,
             log_size_limiter: None,
+            engine: None,
         }
     }
 }
@@ -161,6 +178,11 @@ impl DeltaTableBuilder {
         self
     }
 
+    /// Sets a custom kernel `Engine` to use for snapshot loading and scan operations.
+    pub fn with_engine(mut self, engine: Arc<dyn Engine>) -> Self {
+        self.table_config.engine = Some(EngineRef(engine));
+        self
+    }
 
     /// Sets `version` to the builder
     pub fn with_version(mut self, version: Version) -> Self {
