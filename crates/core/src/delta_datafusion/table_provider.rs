@@ -401,12 +401,19 @@ impl<'a> DeltaScanBuilder<'a> {
             None => {
                 // early return in case we have no push down filters or limit
                 if logical_filter.is_none() && self.limit.is_none() {
+                    // let files = self
+                    //     .snapshot
+                    //     .file_views(&self.log_store, None)
+                    //     .map_ok(|f| f.to_add())
+                    //     .try_collect::<Vec<_>>()
+                    //     .await?;
                     let files = self
                         .snapshot
-                        .file_views(&self.log_store, None)
-                        .map_ok(|f| f.to_add())
-                        .try_collect::<Vec<_>>()
-                        .await?;
+                        .log_data()
+                        .iter()
+                        .map(|f| f.add_action())
+                        .collect::<Vec<_>>();
+
                     let files_scanned = files.len();
                     (files, files_scanned, 0, None)
                 } else {
@@ -426,23 +433,35 @@ impl<'a> DeltaScanBuilder<'a> {
                     let mut rows_collected = 0;
                     let mut files = Vec::with_capacity(num_containers);
 
-                    let file_actions: Vec<_> = self
-                        .snapshot
-                        .file_views(&self.log_store, None)
-                        .map_ok(|f| f.to_add())
-                        .try_collect::<Vec<_>>()
-                        .await?;
+                    // let file_actions: Vec<_> = self
+                    //     .snapshot
+                    //     .file_views(&self.log_store, None)
+                    //     .map_ok(|f| f.to_add())
+                    //     .try_collect::<Vec<_>>()
+                    //     .await?;
 
-                    for (action, keep) in
-                        file_actions.into_iter().zip(files_to_prune.iter().cloned())
-                    {
+                    use rand::seq::SliceRandom;
+
+                    let mut indices = (0..num_containers).collect::<Vec<_>>();
+                    if self.limit.is_some() && std::env::var("DELTA_RS_SHUFFLE_FILES").is_ok() {
+                        let mut rng = rand::rng();
+                        indices.shuffle(&mut rng);
+                    }
+
+                    let log_data_handler = self.snapshot.log_data();
+                    for i in indices {
+                        let file_view = log_data_handler.get(i).unwrap();
+                        let keep = files_to_prune[i];
+
                         // prune file based on predicate pushdown
+                        let action = file_view.add_action_no_stats();
+                        let num_records = file_view.num_records();
                         if keep {
                             // prune file based on limit pushdown
                             if let Some(limit) = self.limit {
-                                if let Some(stats) = action.get_stats()? {
+                                if let Some(num_records) = num_records {
                                     if rows_collected <= limit as i64 {
-                                        rows_collected += stats.num_records;
+                                        rows_collected += num_records as i64;
                                         files.push(action.to_owned());
                                     } else {
                                         break;
