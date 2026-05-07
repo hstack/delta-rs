@@ -101,11 +101,14 @@ mod session;
 pub use session::SessionFallbackPolicy;
 pub(crate) use session::{SessionResolveContext, resolve_session_state};
 use crate::delta_datafusion::expr_adapter::build_expr_adapter_factory;
+use crate::delta_datafusion::schema_null::rewrite_schema_with_nullable_fields;
+
 mod table_provider;
 pub mod udtf;
 pub(crate) mod utils;
 mod expr_adapter;
 pub mod table_provider_old;
+pub mod schema_null;
 
 impl From<DeltaTableError> for DataFusionError {
     fn from(err: DeltaTableError) -> Self {
@@ -236,7 +239,7 @@ fn _arrow_schema(
     partition_columns: &[String],
     wrap_partitions: bool,
 ) -> ArrowSchemaRef {
-    let fields = schema
+    let mut fields = schema
         .fields()
         .into_iter()
         .filter(|f| !partition_columns.contains(&f.name().to_string()))
@@ -265,7 +268,10 @@ fn _arrow_schema(
             }),
         )
         .collect::<Vec<_>>();
-    Arc::new(ArrowSchema::new(fields))
+    let mut schema = Arc::new(ArrowSchema::new(fields));
+    // @Hstack - add the option to have an env var that can nullify fields in the delta schema
+    schema = rewrite_schema_with_nullable_fields(schema);
+    schema
 }
 
 pub(crate) fn files_matching_predicate<'a>(
