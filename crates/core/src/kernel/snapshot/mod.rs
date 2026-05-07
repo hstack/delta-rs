@@ -77,9 +77,9 @@ pub struct Snapshot {
     /// Log segment containing all log files in the snapshot
     pub(crate) inner: Arc<KernelSnapshot>,
     /// Configuration for the current session
-    config: DeltaTableConfig,
+    pub(crate) config: DeltaTableConfig,
     /// Optional materialized replay state owned by this snapshot.
-    materialized_files: Option<Arc<MaterializedFiles>>,
+    pub(crate) materialized_files: Option<Arc<MaterializedFiles>>,
 }
 
 impl Snapshot {

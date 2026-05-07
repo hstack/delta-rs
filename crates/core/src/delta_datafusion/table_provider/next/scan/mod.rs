@@ -55,6 +55,7 @@ use object_store::{ObjectMeta, path::Path};
 use tracing::debug;
 use url::Url;
 
+pub use self::codec::DeltaNextPhysicalCodec;
 pub use self::exec::DeltaScanExec;
 use self::exec_meta::DeltaScanMetaExec;
 pub(crate) use self::plan::{KernelScanPlan, ProjectedScanContract, supports_filters_pushdown};
@@ -75,6 +76,7 @@ mod exec;
 mod exec_meta;
 mod plan;
 mod replay;
+mod codec;
 
 type ScanMetadataStream = Pin<Box<dyn Stream<Item = Result<ScanMetadata, DeltaTableError>> + Send>>;
 
