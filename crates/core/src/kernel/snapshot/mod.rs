@@ -62,6 +62,7 @@ mod scan;
 mod serde;
 mod stats_projection;
 mod stream;
+pub mod size_limits;
 
 pub(crate) static SCAN_ROW_ARROW_SCHEMA: LazyLock<arrow_schema::SchemaRef> =
     LazyLock::new(|| Arc::new(scan_row_schema().as_ref().try_into_arrow().unwrap()));
@@ -84,8 +85,10 @@ impl Snapshot {
         config: DeltaTableConfig,
         version: Option<Version>,
     ) -> DeltaResult<Self> {
+        let engine2 = engine.clone();
+        let table_root2 = table_root.clone();
         let snapshot = match spawn_blocking_with_span(move || {
-            let mut builder = KernelSnapshot::builder_for(table_root);
+            let mut builder = KernelSnapshot::builder_for(table_root.clone());
             if let Some(version) = version {
                 builder = builder.at_version(version);
             }
@@ -104,6 +107,9 @@ impl Snapshot {
                 }
             }
         };
+
+        let (snapshot, load_metrics) =
+            size_limits::apply_optional_log_limiter(snapshot, config.log_size_limiter.as_ref(), engine2.as_ref(), &table_root2).await?;
 
         Ok(Self {
             inner: snapshot,
