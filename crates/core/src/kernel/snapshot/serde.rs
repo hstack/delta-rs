@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize, ser::SerializeSeq};
 use url::Url;
 
 use crate::DeltaTableConfig;
-
+use crate::kernel::size_limits::SnapshotLoadMetrics;
 use super::{EagerSnapshot, MaterializedFiles, MaterializedFilesScope, Snapshot};
 
 #[derive(Serialize, Deserialize)]
@@ -311,6 +311,7 @@ impl<'de> Visitor<'de> for SnapshotVisitor {
                 .map_err(de::Error::custom)?;
 
         let snapshot = KernelSnapshot::new(log_segment, table_configuration);
+        let load_metrics = SnapshotLoadMetrics::from_snapshot(&snapshot);
 
         Ok(Snapshot {
             inner: Arc::new(snapshot),
@@ -319,6 +320,7 @@ impl<'de> Visitor<'de> for SnapshotVisitor {
                 .map(|value| value.into_materialized().map_err(de::Error::custom))
                 .transpose()?
                 .map(Arc::new),
+            load_metrics,
         })
     }
 }

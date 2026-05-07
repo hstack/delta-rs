@@ -130,10 +130,12 @@ impl TryFrom<&DeltaScanExec> for DeltaScanExecWire {
             // At upgrade, RECHECK usage sites for DeltaTableConfig, we'll need to re-evaluate if
             //      stuff begins writing to it
             let delta_table_config = DeltaTableConfig::default();
+            let load_metrics = SnapshotLoadMetrics::from_snapshot(&exec_scan_plan_scan_snapshot);
             Snapshot {
                 inner: exec_scan_plan_scan_snapshot,
                 config: delta_table_config,
                 materialized_files: None,
+                load_metrics,
             }
         };
 
