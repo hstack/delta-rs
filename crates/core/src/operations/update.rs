@@ -28,8 +28,8 @@ use datafusion::{
     error::DataFusionError,
     execution::context::SessionState,
     logical_expr::{
-        ExprSchemable as _, Extension, LogicalPlan, LogicalPlanBuilder, UserDefinedLogicalNode,
-        case, cast, col, lit, try_cast, when,
+        Extension, LogicalPlan, LogicalPlanBuilder, UserDefinedLogicalNode, case, col, lit, when,
+        cast,
     },
     physical_plan::{ExecutionPlan, metrics::MetricBuilder},
     physical_planner::{ExtensionPlanner, PhysicalPlanner},
@@ -280,7 +280,6 @@ async fn execute(
     session: &dyn Session,
     writer_properties: Option<WriterProperties>,
     operation_id: Uuid,
-    safe_cast: bool,
 ) -> DeltaResult<(Vec<Action>, UpdateMetrics)> {
     // Validate the predicate and update expressions.
     //
@@ -345,17 +344,19 @@ async fn execute(
         .into_iter()
         .map(|field| {
             let expr = match updates.get(field.name()) {
+                // Some(expr) => case(col(UPDATE_PREDICATE_COLNAME))
+                //     .when(lit(true), expr.to_owned())
+                //     .otherwise(col(Column::from_name(field.name())))?
+                //     .alias(field.name()),
                 Some(expr) => {
-                    let target_type = field.data_type().clone();
-                    let update_expr = if expr.get_type(plan_with_metrics.schema())? == target_type {
-                        expr.to_owned()
-                    } else if safe_cast {
-                        try_cast(expr.to_owned(), target_type)
-                    } else {
-                        cast(expr.to_owned(), target_type)
-                    };
+                    // Cast the update expression to the target column type so that
+                    // (a) the CASE branches are always the same type and DataFusion cannot
+                    //     silently widen the column (e.g. Int32 → Utf8), and
+                    // (b) incompatible assignments (e.g. a non-numeric string into an Int32
+                    //     column) are caught during plan optimisation via constant folding.
+                    let typed_expr = cast(expr.to_owned(), field.data_type().clone());
                     case(col(UPDATE_PREDICATE_COLNAME))
-                        .when(lit(true), update_expr)
+                        .when(lit(true), typed_expr)
                         .otherwise(col(Column::from_name(field.name())))?
                         .alias(field.name())
                 }
@@ -507,7 +508,6 @@ impl std::future::IntoFuture for UpdateBuilder {
                 &state,
                 this.writer_properties,
                 operation_id,
-                this.safe_cast,
             )
             .await?;
 
