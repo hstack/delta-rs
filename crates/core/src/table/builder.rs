@@ -16,6 +16,7 @@ use crate::kernel::Version;
 use crate::logstore::storage::IORuntime;
 use crate::logstore::{LogStoreRef, StorageConfig, object_store_factories};
 use crate::{DeltaResult, DeltaTable, DeltaTableError};
+use crate::kernel::size_limits::LogSizeLimiter;
 
 /// possible version specifications for loading a delta table
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
@@ -66,6 +67,10 @@ pub struct DeltaTableConfig {
     #[delta(skip)]
     /// When a runtime handler is provided, all IO tasks are spawn in that handle
     pub io_runtime: Option<IORuntime>,
+
+    #[delta(skip)]
+    pub log_size_limiter: Option<LogSizeLimiter>,
+
 }
 
 impl Default for DeltaTableConfig {
@@ -76,6 +81,7 @@ impl Default for DeltaTableConfig {
             log_batch_size: 1024,
             skip_stats: false,
             io_runtime: None,
+            log_size_limiter: None,
         }
     }
 }
@@ -86,6 +92,7 @@ impl PartialEq for DeltaTableConfig {
             && self.log_buffer_size == other.log_buffer_size
             && self.log_batch_size == other.log_batch_size
             && self.skip_stats == other.skip_stats
+            && self.log_size_limiter == other.log_size_limiter
     }
 }
 
@@ -146,6 +153,13 @@ impl DeltaTableBuilder {
         self.table_config.skip_stats = skip_stats;
         self
     }
+
+    /// Sets `log_size_limiter` to the builder
+    pub fn with_log_size_limiter(mut self, limiter: LogSizeLimiter) -> Self {
+        self.table_config.log_size_limiter = Some(limiter);
+        self
+    }
+
 
     /// Sets `version` to the builder
     pub fn with_version(mut self, version: Version) -> Self {
@@ -213,6 +227,7 @@ impl DeltaTableBuilder {
             storage_options
                 .clone()
                 .into_iter()
+                .map(|(k, v)| (k.strip_prefix("deltalake.").map(ToString::to_string).unwrap_or(k), v))
                 .map(|(k, v)| {
                     let needs_trim = v.starts_with("http://")
                         || v.starts_with("https://")
@@ -225,6 +240,12 @@ impl DeltaTableBuilder {
                 })
                 .collect(),
         );
+        let mut opts = self.storage_options.unwrap().clone();
+        self.table_config.log_size_limiter = LogSizeLimiter::from_storage_options(&mut opts)
+            .expect("Invalid log_size_limiter options");
+
+        self.storage_options = Some(opts);
+
         self
     }
 
