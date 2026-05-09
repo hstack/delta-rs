@@ -87,6 +87,7 @@ pub(crate) mod parquet_utils;
 pub mod protocol;
 pub use kernel::schema;
 pub mod table;
+pub mod hacks;
 
 #[cfg(any(test, feature = "integration_test"))]
 pub mod test_utils;

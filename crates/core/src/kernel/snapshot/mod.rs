@@ -76,7 +76,7 @@ pub(crate) static SCAN_ROW_ARROW_SCHEMA: LazyLock<arrow_schema::SchemaRef> =
 #[derive(Debug, Clone, PartialEq)]
 pub struct Snapshot {
     /// Log segment containing all log files in the snapshot
-    pub(crate) inner: Arc<KernelSnapshot>,
+    pub inner: Arc<KernelSnapshot>,
     /// Configuration for the current session
     pub(crate) config: DeltaTableConfig,
     /// Optional materialized replay state owned by this snapshot.
@@ -947,7 +947,7 @@ impl MaterializedFiles {
 /// A snapshot of a Delta table that has been eagerly loaded into memory.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EagerSnapshot {
-    snapshot: Arc<Snapshot>,
+    pub snapshot: Arc<Snapshot>,
 }
 
 /// Read `_last_checkpoint` and return the hinted version when present.
