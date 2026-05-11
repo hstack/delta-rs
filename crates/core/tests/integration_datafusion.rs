@@ -2196,6 +2196,7 @@ mod deep {
     use std::sync::Arc;
     use arrow_cast::display::FormatOptions;
     use arrow_cast::pretty;
+    use arrow_schema::{DataType, Field, Fields, Schema, SchemaRef};
     use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
     use datafusion::datasource::physical_plan::ParquetSource;
     use datafusion::optimizer::optimize_projections_deep::DeepColumnIndexMap;
@@ -2208,7 +2209,8 @@ mod deep {
     use datafusion_proto::protobuf::PhysicalPlanNode;
     use prost::Message;
     use tracing::info;
-    use deltalake_core::delta_datafusion::{DeltaNextPhysicalCodec, DeltaPhysicalCodec, DeltaScanExec};
+    use deltalake_core::DeltaTableBuilder;
+    use deltalake_core::delta_datafusion::{DataFusionMixins, DeltaNextPhysicalCodec, DeltaPhysicalCodec, DeltaScanConfig, DeltaScanExec, DeltaScanNext};
     use deltalake_core::delta_datafusion::table_provider_old::DeltaTableOldProvider;
     use deltalake_core::delta_datafusion::udtf::register_delta_table_udtf;
 
@@ -2483,6 +2485,181 @@ mod deep {
             input.children().iter()
                 .find_map(|child| find_exec_node(child))
         }
+    }
+
+    fn add_virtual_field_to_schema(
+        base: &Schema,
+        field_name: &str,
+        field_to_add: Field,
+    ) -> SchemaRef {
+        let new_fields: Vec<Arc<Field>> = base.fields().iter().map(|f| {
+            if f.name() == field_name {
+                if let DataType::Struct(inner) = f.data_type() {
+                    let mut new_inner: Vec<Arc<Field>> = inner.iter().cloned().collect();
+                    new_inner.push(Arc::new(field_to_add.clone()));
+                    return Arc::new(Field::new(
+                        f.name(),
+                        DataType::Struct(Fields::from(new_inner)),
+                        f.is_nullable(),
+                    ));
+                }
+            }
+            f.clone()
+        }).collect();
+        Arc::new(Schema::new(new_fields))
+    }
+
+    /// Bug regression: when a custom logical schema adds a virtual sub-field alongside
+    /// physical sub-fields in a struct, deep_projection must not pass the virtual
+    /// field name to the Parquet reader (which falls back to reading the full struct).
+    #[tokio::test]
+    async fn test_deep_projection_with_virtual_sibling_field() -> datafusion::common::Result<()> {
+        unsafe { std::env::set_var("DELTA_USE_EXPR_ADAPTER", "1"); }
+
+        let config = SessionConfig::new()
+            .set_bool("datafusion.sql_parser.enable_ident_normalization", false);
+        let ctx = SessionContext::new_with_config(config);
+
+        let delta_path = format!("{}/tests/data/deep", env!("CARGO_MANIFEST_DIR"));
+        let url = url::Url::from_directory_path(
+            std::path::Path::new(&delta_path).canonicalize()?,
+        )
+        .unwrap();
+
+        let table = DeltaTableBuilder::from_url(url)?
+            .load()
+            .await?;
+
+        let base_schema = table.snapshot()?.snapshot().read_schema();
+        let custom_schema = add_virtual_field_to_schema(
+            &base_schema,
+            "_acp_system_metadata",
+            Field::new("virtual_field", DataType::Utf8, true),
+        );
+
+        let scan_config = DeltaScanConfig::new().with_schema(custom_schema);
+        let scan = DeltaScanNext::new(
+            table.snapshot()?.snapshot().clone(),
+            scan_config,
+        )
+        .expect("failed to build DeltaScanNext");
+        ctx.register_table("t", Arc::new(scan))?;
+
+        // Select one physical sub-field and one virtual sub-field from the same struct.
+        let query = r#"
+            SELECT
+                t._acp_system_metadata.acp_sourceBatchId AS batch_id,
+                t._acp_system_metadata.virtual_field     AS vfield
+            FROM t
+        "#;
+
+        let plan = ctx.state().create_logical_plan(query).await?;
+        let optimized = ctx.state().optimize(&plan)?;
+        let physical_plan = ctx.state().query_planner()
+            .create_physical_plan(&optimized, &ctx.state())
+            .await?;
+
+        // Correct data: physical field has a value, virtual field is null.
+        let batches = collect(physical_plan.clone(), ctx.state().task_ctx()).await?;
+        let results = pretty::pretty_format_batches_with_options(
+            &batches,
+            &FormatOptions::default(),
+        )?
+        .to_string();
+        println!("{}", results);
+        assert!(results.contains("b1"), "acp_sourceBatchId should be 'b1'");
+        assert!(results.contains('|'), "expected tabular output");
+
+        // The physical Parquet plan must NOT include "virtual_field" in projection_deep.
+        let proj = extract_projection_deep_from_plan(physical_plan);
+        assert!(!proj.is_empty(), "expected at least one deep projection in plan");
+        let deep_map = proj[0].as_ref().expect("deep projection must be set");
+        assert!(
+            deep_map.values().all(|fields| !fields.contains(&"virtual_field".to_string())),
+            "virtual_field must be stripped from physical projection_deep, got: {:?}",
+            deep_map,
+        );
+        assert!(
+            deep_map.values().any(|fields| fields.contains(&"acp_sourceBatchId".to_string())),
+            "acp_sourceBatchId must remain in physical projection_deep, got: {:?}",
+            deep_map,
+        );
+
+        Ok(())
+    }
+
+    /// Bug regression: when ALL requested sub-fields of a struct are virtual,
+    /// the filter must inject the first physical sub-field as a row-count anchor
+    /// so the reader produces the right number of null rows.
+    #[tokio::test]
+    async fn test_deep_projection_only_virtual_sub_fields() -> datafusion::common::Result<()> {
+        unsafe { std::env::set_var("DELTA_USE_EXPR_ADAPTER", "1"); }
+
+        let config = SessionConfig::new()
+            .set_bool("datafusion.sql_parser.enable_ident_normalization", false);
+        let ctx = SessionContext::new_with_config(config);
+
+        let delta_path = format!("{}/tests/data/deep", env!("CARGO_MANIFEST_DIR"));
+        let url = url::Url::from_directory_path(
+            std::path::Path::new(&delta_path).canonicalize()?,
+        )
+        .unwrap();
+
+        let table = DeltaTableBuilder::from_url(url)?
+            .load()
+            .await?;
+
+        let base_schema = table.snapshot()?.snapshot().read_schema();
+        let custom_schema = add_virtual_field_to_schema(
+            &base_schema,
+            "_acp_system_metadata",
+            Field::new("virtual_field", DataType::Utf8, true),
+        );
+
+        let scan_config = DeltaScanConfig::new().with_schema(custom_schema);
+        let scan = DeltaScanNext::new(
+            table.snapshot()?.snapshot().clone(),
+            scan_config,
+        )
+        .expect("failed to build DeltaScanNext");
+        ctx.register_table("t", Arc::new(scan))?;
+
+        // Select ONLY a virtual sub-field — no physical sub-field requested.
+        let query = r#"
+            SELECT t._acp_system_metadata.virtual_field AS vfield
+            FROM t
+        "#;
+
+        let plan = ctx.state().create_logical_plan(query).await?;
+        let optimized = ctx.state().optimize(&plan)?;
+        let physical_plan = ctx.state().query_planner()
+            .create_physical_plan(&optimized, &ctx.state())
+            .await?;
+
+        // virtual_field must be all-null with the correct row count (1 row in this table).
+        let batches = collect(physical_plan.clone(), ctx.state().task_ctx()).await?;
+        let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total_rows, 1, "expected 1 row matching physical table row count");
+        let col = batches[0].column_by_name("vfield").expect("vfield column must exist");
+        assert_eq!(col.null_count(), col.len(), "virtual_field column must be all-null");
+
+        // The physical plan must have a non-empty projection_deep for the struct
+        // (the row-count anchor), so we did not fall back to reading the full struct.
+        let proj = extract_projection_deep_from_plan(physical_plan);
+        assert!(!proj.is_empty(), "expected deep projection to be present");
+        let deep_map = proj[0].as_ref().expect("deep projection must be set");
+        assert!(
+            deep_map.values().any(|fields| !fields.is_empty()),
+            "projection_deep must have at least one physical anchor field, got: {:?}",
+            deep_map,
+        );
+        assert!(
+            deep_map.values().all(|fields| !fields.contains(&"virtual_field".to_string())),
+            "virtual_field must not appear in physical projection_deep, got: {:?}",
+            deep_map,
+        );
+
+        Ok(())
     }
 
 }
