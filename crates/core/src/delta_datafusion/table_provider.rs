@@ -460,7 +460,7 @@ impl<'a> DeltaScanBuilder<'a> {
                             // prune file based on limit pushdown
                             if let Some(limit) = self.limit {
                                 if let Some(num_records) = num_records {
-                                    if rows_collected <= limit as i64 {
+                                    if rows_collected < limit as i64 {
                                         rows_collected += num_records as i64;
                                         files.push(action.to_owned());
                                     } else {
