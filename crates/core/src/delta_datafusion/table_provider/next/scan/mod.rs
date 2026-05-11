@@ -15,7 +15,7 @@
 //! predicates, while execution plans handle the actual data reading and transformation.
 
 use std::{collections::VecDeque, pin::Pin, sync::Arc};
-
+use std::collections::HashSet;
 use arrow::array::AsArray;
 use arrow_array::{ArrayRef, RecordBatch, StructArray};
 use arrow_cast::{CastOptions, cast_with_options};
@@ -49,6 +49,7 @@ use datafusion_datasource::file::FileSource;
 use delta_kernel::{
     Engine, Expression, expressions::StructData, scan::ScanMetadata, table_features::TableFeature,
 };
+use delta_kernel::engine::arrow_conversion::TryIntoArrow as _;
 use futures::{Stream, TryStreamExt as _, future::ready};
 use itertools::Itertools as _;
 use object_store::{ObjectMeta, path::Path};
@@ -238,6 +239,17 @@ async fn get_data_scan_plan(
     // let pq_plan = if false {
     let pq_plan = if let Some(result_projection_deep) = scan_plan.result_projection_deep.clone()
         && has_deep_projection(&result_projection_deep) {
+
+        // Build the true physical schema from the kernel table config (no virtual overlay fields).
+        // scan_plan.parquet_read_schema may include virtual sub-fields injected via a custom
+        // DeltaScanConfig::with_schema, so we derive physical field names from table_config instead.
+        let table_config_schema: SchemaRef = Arc::new(table_config.schema().as_ref().try_into_arrow()?);
+        let physical_projection_deep = filter_projection_deep_for_physical_schema(
+            &result_projection_deep,
+            &scan_plan.result_schema,
+            &table_config_schema,
+        );
+
         get_read_plan_deep(
             session,
             files_by_store,
@@ -245,7 +257,7 @@ async fn get_data_scan_plan(
             limit,
             &file_id_field,
             predicate,
-            result_projection_deep.clone()
+            physical_projection_deep,
         )
         .await?
     } else {
@@ -499,6 +511,64 @@ async fn get_read_plan_deep(
         1 => plans.remove(0),
         _ => UnionExec::try_new(plans)?,
     })
+}
+
+/// Translates a logical `projection_deep` map — produced by DataFusion against
+/// the overlay/virtual schema — into one that is safe to hand to the Parquet reader,
+/// which only knows about the delta table schema.
+///
+/// For each entry:
+/// - If the top-level field is absent from `delta_table_schema` (entirely virtual),
+///   the entry is dropped. it will be computed from other physical columns.
+/// - If the field is a Struct, virtual sub-field names are filtered out.  If all
+///   requested sub-fields are virtual, the first physical sub-field is injected as a
+///   row-count anchor so the reader produces the correct number of rows for null
+///   materialization of virtual sub-fields.
+/// - Non-struct physical fields are carried through unchanged.
+///
+/// Keys in the returned map are indices into `delta_table_schema` (not the result schema).
+fn filter_projection_deep_for_physical_schema(
+    projection_deep: &std::collections::HashMap<usize, Vec<String>>,
+    result_schema: &SchemaRef,
+    table_config_schema: &SchemaRef,
+) -> std::collections::HashMap<usize, Vec<String>> {
+    use std::collections::{HashMap, HashSet};
+
+    let mut physical = HashMap::with_capacity(projection_deep.len());
+
+    for (logical_idx, requested) in projection_deep {
+        // Resolve logical → physical index
+        let Some(field) = result_schema.fields().get(*logical_idx) else { continue };
+        let Ok(physical_idx) = table_config_schema.index_of(field.name()) else { continue };
+
+        let filtered = match table_config_schema.field(physical_idx).data_type() {
+            DataType::Struct(physical_fields) => {
+                let physical_names: HashSet<&str> =
+                    physical_fields.iter().map(|f| f.name().as_str()).collect();
+
+                let kept: Vec<_> = requested
+                    .iter()
+                    .filter(|n| physical_names.contains(n.as_str()))
+                    .cloned()
+                    .collect();
+
+                if kept.is_empty() {
+                    // All sub-fields are virtual — anchor on the first physical one
+                    match physical_fields.first() {
+                        Some(anchor) => vec![anchor.name().clone()],
+                        None => continue,
+                    }
+                } else {
+                    kept
+                }
+            }
+            _ => requested.clone(),
+        };
+
+        physical.insert(physical_idx, filtered);
+    }
+
+    physical
 }
 
 // Small helper to reuse some code between exec and exec_meta
