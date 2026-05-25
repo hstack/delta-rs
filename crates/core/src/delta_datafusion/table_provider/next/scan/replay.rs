@@ -15,20 +15,20 @@ use arrow::{array::BooleanArray, compute::filter_record_batch};
 use arrow_array::RecordBatch;
 use datafusion::{
     common::{
-        ColumnStatistics, HashMap, Statistics, error::DataFusionErrorBuilder, stats::Precision,
+        error::DataFusionErrorBuilder, stats::Precision, ColumnStatistics, HashMap, Statistics,
     },
     error::DataFusionError,
     scalar::ScalarValue,
 };
 use delta_kernel::{
-    Engine, ExpressionRef,
     engine::{arrow_conversion::TryIntoArrow, arrow_data::ArrowEngineData},
     engine_data::FilteredEngineData,
     expressions::{Scalar, StructData},
     scan::{
-        Scan as KernelScan, ScanMetadata,
         state::{DvInfo, ScanFile},
+        Scan as KernelScan, ScanMetadata,
     },
+    Engine, ExpressionRef,
 };
 use futures::Stream;
 use itertools::Itertools;
@@ -36,12 +36,12 @@ use pin_project_lite::pin_project;
 use url::Url;
 
 use crate::{
-    DeltaResult, DeltaTableError,
-    delta_datafusion::{DeltaScanConfig, engine::to_datafusion_scalar},
+    delta_datafusion::{engine::to_datafusion_scalar, DeltaScanConfig},
     kernel::{
-        LogicalFileView, ReceiverStreamBuilder, Scan, StatsProjection, StructDataExt,
-        parse_stats_column_with_schema,
+        parse_stats_column_with_schema, LogicalFileView, ReceiverStreamBuilder, Scan,
+        StatsProjection, StructDataExt,
     },
+    DeltaResult, DeltaTableError,
 };
 
 #[derive(Debug)]
@@ -372,12 +372,16 @@ pub(crate) struct ScanFileContext {
     pub stats: Statistics,
     /// Partition values for the file.
     pub partitions: Option<StructData>,
+    /// Whether this file carries a deletion vector. Cached at construction time so consumers
+    /// can branch on DV presence without waiting on the asynchronous DV-load task.
+    pub has_dv: bool,
 }
 
 impl ScanFileContext {
     /// Create a new `ScanFileContext` with the given file URL, size, and statistics.
     fn new(inner: ScanFileContextInner, stats: Statistics, partitions: Option<StructData>) -> Self {
         Self {
+            has_dv: inner.dv_info.has_vector(),
             file_url: inner.file_url,
             size: inner.size,
             transform: inner.transform,
@@ -500,10 +504,15 @@ fn visit_scan_file(ctx: &mut ScanContext, scan_file: ScanFile) {
 mod tests {
     use std::collections::HashMap;
 
+    use arrow_schema::Schema;
+    use datafusion::common::Statistics;
+    use delta_kernel::actions::deletion_vector::{
+        DeletionVectorDescriptor, DeletionVectorStorageType,
+    };
     use delta_kernel::scan::state::{DvInfo, ScanFile};
     use url::Url;
 
-    use super::{ScanContext, visit_scan_file};
+    use super::{visit_scan_file, ScanContext, ScanFileContext, ScanFileContextInner};
 
     fn scan_file(path: impl Into<String>) -> ScanFile {
         ScanFile {
@@ -534,6 +543,50 @@ mod tests {
         assert_eq!(
             ctx.files[0].file_url.as_str(),
             "file:///tmp/delta/part-000.parquet"
+        );
+    }
+
+    #[test]
+    fn test_scan_file_context_propagates_has_dv_from_inner() {
+        let url = Url::parse("file:///tmp/f.parquet").unwrap();
+        let descriptor = DeletionVectorDescriptor {
+            storage_type: DeletionVectorStorageType::Inline,
+            path_or_inline_dv: String::new(),
+            offset: None,
+            size_in_bytes: 0,
+            cardinality: 0,
+        };
+        let inner_with_dv = ScanFileContextInner {
+            file_url: url.clone(),
+            size: 0,
+            transform: None,
+            num_records: None,
+            dv_info: DvInfo::from(descriptor),
+        };
+        let inner_without_dv = ScanFileContextInner {
+            file_url: url,
+            size: 0,
+            transform: None,
+            num_records: None,
+            dv_info: DvInfo::default(),
+        };
+
+        let empty_schema = Schema::empty();
+        let ctx_with =
+            ScanFileContext::new(inner_with_dv, Statistics::new_unknown(&empty_schema), None);
+        let ctx_without = ScanFileContext::new(
+            inner_without_dv,
+            Statistics::new_unknown(&empty_schema),
+            None,
+        );
+
+        assert!(
+            ctx_with.has_dv,
+            "ScanFileContext built from inner with DV should expose has_dv=true"
+        );
+        assert!(
+            !ctx_without.has_dv,
+            "ScanFileContext built from inner without DV should expose has_dv=false"
         );
     }
 }
