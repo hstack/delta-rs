@@ -30,6 +30,7 @@ use datafusion::{
     datasource::physical_plan::{ParquetSource, parquet::CachedParquetFileReaderFactory},
     error::DataFusionError,
     execution::object_store::ObjectStoreUrl,
+    logical_expr::TableProviderFilterPushDown,
     physical_plan::{
         ExecutionPlan,
         empty::EmptyExec,
@@ -58,6 +59,7 @@ use url::Url;
 pub use self::codec::DeltaNextPhysicalCodec;
 pub use self::exec::DeltaScanExec;
 use self::exec_meta::DeltaScanMetaExec;
+use self::limit::LimitPruneState;
 pub(crate) use self::plan::{KernelScanPlan, ProjectedScanContract, supports_filters_pushdown};
 use self::replay::{ScanFileContext, ScanFileStream};
 use super::FileSelection;
@@ -72,11 +74,12 @@ use crate::{
 };
 use crate::delta_datafusion::expr_adapter::build_expr_adapter_factory;
 
+mod codec;
 mod exec;
 mod exec_meta;
+mod limit;
 mod plan;
 mod replay;
-mod codec;
 
 type ScanMetadataStream = Pin<Box<dyn Stream<Item = Result<ScanMetadata, DeltaTableError>> + Send>>;
 
@@ -89,8 +92,32 @@ pub(super) async fn execution_plan(
     limit: Option<usize>,
     file_selection: Option<&FileSelection>,
 ) -> Result<Arc<dyn ExecutionPlan>> {
-    let (files, transforms, dvs, metrics) =
-        replay_files(engine, &scan_plan, config.clone(), stream, file_selection).await?;
+    // File-level limit pruning is safe iff:
+    // - the caller asked for a row cap,
+    // - no explicit FileSelection is in play (explicit pins win), and
+    // - every filter is marked Exact (DataFusion's own contract already forbids
+    //   passing `Some(N)` here when an Inexact filter would survive above the
+    //   scan; this check is a defensive duplicate so the invariant is local).
+    let prune_by_limit: Option<usize> = limit.filter(|_| {
+        file_selection.is_none() && {
+            let filter_refs: Vec<&Expr> = scan_plan.filters.iter().collect();
+            let pushdown =
+                supports_filters_pushdown(&filter_refs, scan_plan.table_configuration(), config);
+            pushdown
+                .iter()
+                .all(|p| matches!(p, TableProviderFilterPushDown::Exact))
+        }
+    });
+
+    let (files, transforms, dvs, metrics) = replay_files(
+        engine,
+        &scan_plan,
+        config.clone(),
+        stream,
+        file_selection,
+        prune_by_limit,
+    )
+    .await?;
 
     let file_id_field = scan_plan.contract.file_id_field.clone();
     if scan_plan.is_metadata_only() {
@@ -184,6 +211,7 @@ async fn replay_files(
     scan_config: DeltaScanConfig,
     stream: ScanMetadataStream,
     file_selection: Option<&FileSelection>,
+    prune_by_limit: Option<usize>,
 ) -> Result<(
     Vec<ScanFileContext>,
     HashMap<String, Arc<Expression>>,
@@ -197,10 +225,30 @@ async fn replay_files(
         file_selection.map(|selection| &selection.file_ids),
         stream,
     );
-    let mut files = Vec::new();
-    while let Some(file) = stream.try_next().await? {
-        files.extend(file);
-    }
+
+    let mut files = if let Some(cap) = prune_by_limit {
+        let mut state = LimitPruneState::new(cap);
+        'outer: while let Some(batch_files) = stream.try_next().await? {
+            for file in batch_files {
+                if state.accept(file) {
+                    break 'outer;
+                }
+            }
+        }
+        // The second tuple element (unknown-pool drops) is a subset of
+        // `count_files_pruned_by_limit`, which we compute below from the
+        // stream's total visit count minus the final file set. That formula
+        // also captures files in the partially-consumed final batch that we
+        // dropped on early-break without going through the unknown pool.
+        let (kept, _) = state.finalize();
+        kept
+    } else {
+        let mut files = Vec::new();
+        while let Some(batch_files) = stream.try_next().await? {
+            files.extend(batch_files);
+        }
+        files
+    };
 
     if let Some(selection) = file_selection
         && selection.missing_file_policy == super::MissingFilePolicy::Error
@@ -244,9 +292,20 @@ async fn replay_files(
         .await?;
 
     let metrics = ExecutionPlanMetricsSet::new();
+    // `count_files_scanned` reports files made available to the Parquet reader,
+    // i.e. what survived after both kernel skipping and limit-based pruning.
     MetricBuilder::new(&metrics)
         .global_counter("count_files_scanned")
-        .add(stream.metrics.num_scanned);
+        .add(files.len());
+    // `count_files_pruned_by_limit` is the count of kernel-emitted files that
+    // didn't survive into the final scan plan because the limit was reached.
+    // Computed from the stream's visit counter (post-kernel-skipping) minus the
+    // final file set, so it correctly captures both unknown-pool drops and any
+    // mid-batch tail we discarded on early-break.
+    let pruned_by_limit = stream.metrics.num_scanned.saturating_sub(files.len());
+    MetricBuilder::new(&metrics)
+        .global_counter("count_files_pruned_by_limit")
+        .add(pruned_by_limit);
 
     Ok((files, transforms, dvs, metrics))
 }
