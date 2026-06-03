@@ -103,25 +103,56 @@ where
 pub(crate) fn scan_row_in_eval(
     snapshot: &KernelSnapshot,
 ) -> DeltaResult<Arc<dyn ExpressionEvaluator>> {
-    static EXPRESSION: LazyLock<Arc<Expression>> = LazyLock::new(|| {
-        Expression::struct_from(
-            scan_row_schema()
-                .fields()
-                .map(|field| Expression::column([field.name.clone()])),
-        )
-        .into()
-    });
-    static OUT_TYPE: LazyLock<DataType> =
-        LazyLock::new(|| DataType::Struct(Box::new(scan_row_schema().as_ref().clone())));
+    // @HStack: when the input schema carries `stats_parsed` (the HSTACK
+    // skip-stats-loading optimization, see delta-kernel-rs commit
+    // `[HSTACK] fix: don't load "stats" column if we have "stats_parsed"`),
+    // project it through to kernel's `scan_metadata_from`. The companion
+    // kernel commit `[HSTACK] feat: propagate stats_parsed through
+    // scan_metadata_from` then routes `add.stats_parsed` into ScanFile.stats
+    // so callers like the limit-pushdown path see `numRecords`. Without that
+    // column in the input the projection is byte-identical to the original
+    // static one.
+    let input_arrow = snapshot.scan_row_parsed_schema_arrow()?;
+    let has_stats_parsed = input_arrow.field_with_name(FIELD_STATS_PARSED).is_ok();
 
-    let input_schema = snapshot.scan_row_parsed_schema_arrow()?;
-    let input_schema = Arc::new(input_schema.as_ref().try_into_kernel()?);
+    let (expression, out_type) = build_scan_row_in_projection(snapshot, has_stats_parsed)?;
+    let input_schema = Arc::new(input_arrow.as_ref().try_into_kernel()?);
 
-    Ok(ARROW_HANDLER.new_expression_evaluator(
-        input_schema,
-        EXPRESSION.clone(),
-        OUT_TYPE.clone(),
-    )?)
+    Ok(ARROW_HANDLER.new_expression_evaluator(input_schema, expression, out_type)?)
+}
+
+/// Build the projection EXPRESSION and OUT_TYPE for [`scan_row_in_eval`].
+///
+/// Always projects the fields of `scan_row_schema()`. When `has_stats_parsed`
+/// is true, additionally projects the `stats_parsed` top-level column with the
+/// snapshot's stats schema (numRecords, nullCount, minValues, maxValues -- see
+/// `engine_ext.rs::stats_schema`). The kernel companion in `scan_metadata_from`
+/// declares the same shape (after stripping `tightBounds` from kernel's
+/// `expected_stats_schema`), so the data flows through cleanly.
+/// `partitionValues_parsed` is intentionally not propagated (out of scope).
+fn build_scan_row_in_projection(
+    snapshot: &KernelSnapshot,
+    has_stats_parsed: bool,
+) -> DeltaResult<(Arc<Expression>, DataType)> {
+    let mut projection: Vec<Expression> = scan_row_schema()
+        .fields()
+        .map(|field| Expression::column([field.name.clone()]))
+        .collect();
+    let mut output_fields: Vec<delta_kernel::schema::StructField> =
+        scan_row_schema().fields().cloned().collect();
+
+    if has_stats_parsed {
+        let stats_schema = snapshot.stats_schema()?;
+        output_fields.push(delta_kernel::schema::StructField::nullable(
+            FIELD_STATS_PARSED,
+            stats_schema.as_ref().clone(),
+        ));
+        projection.push(Expression::column([FIELD_STATS_PARSED]));
+    }
+
+    let expression = Arc::new(Expression::struct_from(projection));
+    let out_type = DataType::Struct(Box::new(StructType::new_unchecked(output_fields)));
+    Ok((expression, out_type))
 }
 
 #[cfg(any(test, feature = "datafusion"))]
