@@ -88,6 +88,16 @@ impl<'a> LogDataHandler<'a> {
         self.data.iter().map(|batch| batch.num_rows()).sum()
     }
 
+    pub fn get(&self, mut index: usize) -> Option<LogicalFileView> {
+        for batch in self.data {
+            if index < batch.num_rows() {
+                return Some(LogicalFileView::new(batch.clone(), index));
+            }
+            index -= batch.num_rows();
+        }
+        None
+    }
+
     /// Iterate over each file as a [`LogicalFileView`] without materializing all of them at once.
     pub fn iter(&self) -> impl Iterator<Item = LogicalFileView> + '_ {
         self.data.iter().flat_map(|batch| {
