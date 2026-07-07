@@ -257,6 +257,12 @@ impl Snapshot {
         })
     }
 
+    /// Returns the engine from the config, or falls back to the log store's default engine.
+    fn resolve_engine(config: &DeltaTableConfig, log_store: &dyn LogStore) -> Arc<dyn Engine> {
+        config.engine.as_ref().map(|e| e.0.clone())
+            .unwrap_or_else(|| log_store.engine(None))
+    }
+
     /// Create a new [`Snapshot`] instance
     pub async fn try_new(
         log_store: &dyn LogStore,
@@ -264,7 +270,8 @@ impl Snapshot {
         version: Option<Version>,
     ) -> DeltaResult<Self> {
         // TODO: bundle operation_id with logstore ...
-        let engine = log_store.engine(None);
+        // let engine = log_store.engine(None);
+        let engine = Self::resolve_engine(&config, log_store);
 
         // NB: kernel engine uses Url::join to construct paths,
         // if the path does not end with a slash, the would override the entire path.
@@ -275,6 +282,11 @@ impl Snapshot {
         }
 
         Self::try_new_with_engine(engine, table_root, config, version).await
+    }
+
+    /// Returns the configured engine, falling back to the log store's default engine.
+    pub(crate) fn engine(&self, log_store: &dyn LogStore) -> Arc<dyn Engine> {
+        Self::resolve_engine(&self.config, log_store)
     }
 
     /// Create a [`ScanBuilder`] borrowing this snapshot to configure a read of the table.
@@ -478,7 +490,8 @@ impl Snapshot {
             return Ok(self);
         }
 
-        self.materialize_files_with_engine(log_store.engine(None), None)
+        let engine = self.engine(log_store);
+        self.materialize_files_with_engine(engine, None)
             .await
     }
 
@@ -618,8 +631,11 @@ impl Snapshot {
         {
             return cached;
         }
+
+        let engine = self.engine(log_store);
+
         if predicate.is_some() && self.config.skip_stats {
-            return self.files_with_engine(log_store.engine(None), predicate);
+            return self.files_with_engine(engine, predicate);
         }
 
         match self
@@ -630,14 +646,14 @@ impl Snapshot {
                 let (existing_version, existing_data, existing_predicate) =
                     materialized_seed.into_parts();
                 self.files_from(
-                    log_store.engine(None),
+                    engine,
                     predicate,
                     existing_version,
                     Box::new(existing_data),
                     existing_predicate,
                 )
             }
-            None => self.files_with_engine(log_store.engine(None), predicate),
+            None => self.files_with_engine(engine, predicate),
         }
     }
 
@@ -1070,7 +1086,8 @@ impl Snapshot {
         let tx = builder.tx();
 
         // TODO: bundle operation id with log store ...
-        let engine = log_store.engine(None);
+        // let engine = log_store.engine(None);
+        let engine = self.engine(log_store);
 
         let remove_data = match self
             .inner
@@ -1117,7 +1134,8 @@ impl Snapshot {
         app_id: String,
     ) -> DeltaResult<Option<i64>> {
         // TODO: bundle operation id with log store ...
-        let engine = log_store.engine(None);
+        // let engine = log_store.engine(None);
+        let engine = self.engine(log_store);
         let inner = self.inner.clone();
         let version =
             spawn_blocking_with_span(move || inner.get_app_id_version(&app_id, engine.as_ref()))
@@ -1139,7 +1157,8 @@ impl Snapshot {
         log_store: &dyn LogStore,
         domain: impl ToString,
     ) -> DeltaResult<Option<String>> {
-        let engine = log_store.engine(None);
+        // let engine = log_store.engine(None);
+        let engine = self.engine(log_store);
         let inner = self.inner.clone();
         let domain = domain.to_string();
         let metadata =
@@ -1376,9 +1395,10 @@ impl EagerSnapshot {
         target_version: Option<Version>,
     ) -> DeltaResult<()> {
         let previous_snapshot = self.snapshot.clone();
+        let engine = self.snapshot.engine(log_store);
         let updated_snapshot = previous_snapshot
             .clone()
-            .update(log_store.engine(None), target_version)
+            .update(engine, target_version)
             .await?;
         if Arc::ptr_eq(&updated_snapshot, &previous_snapshot) {
             return Ok(());
