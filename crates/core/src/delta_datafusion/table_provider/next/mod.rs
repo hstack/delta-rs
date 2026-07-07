@@ -734,7 +734,11 @@ impl TableProvider for DeltaScan {
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         self.ensure_read_ready(session)?;
-        let engine = DataFusionEngine::new_from_session(session);
+        // let engine = DataFusionEngine::new_from_session(session);
+        let engine: Arc<dyn Engine> = self.snapshot.snapshot().config.engine.as_ref()
+            .map(|e| e.0.clone())
+            .unwrap_or_else(|| DataFusionEngine::new_from_session(session));
+
         let contract = ProjectedScanContract::try_new(
             self.scan_schema.clone(),
             self.full_schema.clone(),
