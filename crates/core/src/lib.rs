@@ -87,6 +87,7 @@ pub(crate) mod parquet_utils;
 pub mod protocol;
 pub use kernel::schema;
 pub mod table;
+pub mod hacks;
 
 /// Test fixtures and helpers (reference tables, env scoping, batch assertions) exposed for
 /// integration tests of this crate and downstream crates.
