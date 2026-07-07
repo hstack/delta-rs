@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use chrono::{DateTime, FixedOffset, Utc};
+use delta_kernel::Engine;
 use object_store::DynObjectStore;
 use tracing::debug;
 use url::Url;
@@ -12,6 +13,7 @@ use url::Url;
 use super::normalize_table_url;
 use crate::kernel::Version;
 use crate::kernel::size_limits::LogSizeLimiter;
+pub use crate::logstore::config::EngineRef;
 use crate::logstore::storage::IORuntime;
 use crate::logstore::{LogStoreRef, StorageConfig, object_store_factories};
 use crate::{DeltaResult, DeltaTable, DeltaTableError};
@@ -41,6 +43,7 @@ pub struct DeltaTableBuilder {
     storage_options: Option<HashMap<String, String>>,
     allow_http: Option<bool>,
     io_runtime: Option<IORuntime>,
+    engine: Option<EngineRef>,
 }
 
 impl DeltaTableBuilder {
@@ -70,6 +73,7 @@ impl DeltaTableBuilder {
             storage_options: None,
             allow_http: None,
             io_runtime: None,
+            engine: None,
         })
     }
 
@@ -171,6 +175,14 @@ impl DeltaTableBuilder {
         self
     }
 
+    /// Use the supplied kernel engine for snapshot loading and scans.
+    ///
+    /// The engine is runtime-only and is not preserved by table serialization.
+    pub fn with_engine(mut self, engine: Arc<dyn Engine>) -> Self {
+        self.engine = Some(EngineRef(engine));
+        self
+    }
+
     /// Storage options for configuring backend object store
     pub fn storage_options(&self) -> HashMap<String, String> {
         let mut storage_options = self.storage_options.clone().unwrap_or_default();
@@ -193,6 +205,7 @@ impl DeltaTableBuilder {
         let mut storage_config = StorageConfig::parse_options(storage_options)?;
         // Retain table-load options for snapshot loading and log store serialization.
         storage_config.raw = raw_options;
+        storage_config.engine = self.engine.clone();
         if let Some(io_runtime) = self.io_runtime.clone() {
             storage_config = storage_config.with_io_runtime(io_runtime);
         }
@@ -389,6 +402,104 @@ mod tests {
     use super::*;
     use crate::logstore::LogStoreExt;
     use crate::logstore::factories::DefaultObjectStoreFactory;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct TrackingEngine {
+        inner: Arc<dyn Engine>,
+        calls: AtomicUsize,
+    }
+
+    impl Engine for TrackingEngine {
+        fn evaluation_handler(&self) -> Arc<dyn delta_kernel::EvaluationHandler> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            self.inner.evaluation_handler()
+        }
+
+        fn storage_handler(&self) -> Arc<dyn delta_kernel::StorageHandler> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            self.inner.storage_handler()
+        }
+
+        fn json_handler(&self) -> Arc<dyn delta_kernel::JsonHandler> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            self.inner.json_handler()
+        }
+
+        fn parquet_handler(&self) -> Arc<dyn delta_kernel::ParquetHandler> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            self.inner.parquet_handler()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_injected_engine_load_update_and_roundtrip() -> crate::test_utils::TestResult {
+        let fixture = crate::test_utils::TestTables::Simple;
+        let tracked = Arc::new(TrackingEngine {
+            inner: fixture.table_builder()?.build_storage()?.engine(None),
+            calls: AtomicUsize::new(0),
+        });
+        let engine: Arc<dyn Engine> = tracked.clone();
+        let mut table = fixture
+            .table_builder()?
+            .with_engine(engine.clone())
+            .with_version(0)
+            .load()
+            .await?;
+        assert_eq!(table.version(), Some(0));
+        assert!(tracked.calls.swap(0, Ordering::Relaxed) > 0);
+        assert!(Arc::ptr_eq(&table.log_store().engine(None), &engine));
+
+        table.update_incremental(None).await?;
+        assert_eq!(table.version(), Some(4));
+        assert!(tracked.calls.swap(0, Ordering::Relaxed) > 0);
+        assert!(Arc::ptr_eq(&table.log_store().engine(None), &engine));
+
+        let mut restored: DeltaTable = serde_json::from_slice(&serde_json::to_vec(&table)?)?;
+        assert!(!Arc::ptr_eq(&restored.log_store().engine(None), &engine));
+        restored.update_incremental(None).await?;
+        assert_eq!(restored.version(), Some(4));
+        assert_eq!(tracked.calls.load(Ordering::Relaxed), 0);
+        Ok(())
+    }
+
+    #[cfg(feature = "datafusion")]
+    #[tokio::test]
+    async fn test_injected_engine_scan() -> crate::test_utils::TestResult {
+        use crate::delta_datafusion::DeltaScanNext as DeltaScan;
+        use datafusion::catalog::TableProvider;
+        use datafusion::physical_plan::collect;
+        use datafusion::prelude::SessionContext;
+
+        let fixture = crate::test_utils::TestTables::Simple;
+        let tracked = Arc::new(TrackingEngine {
+            inner: fixture.table_builder()?.build_storage()?.engine(None),
+            calls: AtomicUsize::new(0),
+        });
+        let log_store = fixture
+            .table_builder()?
+            .with_engine(tracked.clone())
+            .build_storage()?;
+        let provider = DeltaScan::builder()
+            .with_log_store(log_store)
+            .build()
+            .await?;
+        tracked.calls.store(0, Ordering::Relaxed);
+
+        let session = SessionContext::new();
+        let plan = provider.scan(&session.state(), None, &[], None).await?;
+        let batches = collect(plan, session.task_ctx()).await?;
+        crate::test_utils::assert_batches_sorted_eq!(
+            &[
+                "+----+", "| id |", "+----+", "| 5  |", "| 7  |", "| 9  |", "+----+"
+            ],
+            &batches
+        );
+        assert!(
+            tracked.calls.load(Ordering::Relaxed) > 0,
+            "scan must use the injected engine rather than a new session engine"
+        );
+        Ok(())
+    }
 
     #[test]
     fn test_ensure_table_uri() {

@@ -643,6 +643,14 @@ impl DeltaScan {
         Ok(())
     }
 
+    fn engine(&self, session: &dyn Session) -> Arc<dyn Engine> {
+        self.log_store
+            .as_ref()
+            .and_then(|store| store.config().options().engine.as_ref())
+            .map(|engine| engine.0.clone())
+            .unwrap_or_else(|| DataFusionEngine::new_from_session(session))
+    }
+
     /// Materialize deletion vector keep masks for files in this scan.
     ///
     /// The result is sorted lexicographically by filepath for deterministic ordering and includes
@@ -654,7 +662,7 @@ impl DeltaScan {
         session: &dyn Session,
     ) -> Result<Vec<DeletionVectorSelection>> {
         self.ensure_read_ready(session)?;
-        let engine = DataFusionEngine::new_from_session(session);
+        let engine = self.engine(session);
 
         let scan_plan = KernelScanPlan::try_new(
             self.snapshot.snapshot(),
@@ -745,7 +753,7 @@ impl TableProvider for DeltaScan {
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         self.ensure_read_ready(session)?;
-        let engine = DataFusionEngine::new_from_session(session);
+        let engine = self.engine(session);
         let contract = ProjectedScanContract::try_new(
             self.scan_schema.clone(),
             self.full_schema.clone(),
