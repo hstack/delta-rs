@@ -220,15 +220,25 @@ pub fn cast_record_batch(
         ..Default::default()
     };
 
-    // Can be simplified with StructArray::try_new_with_length in arrow 55.1
-    let col_arrays = batch.columns().to_owned();
-    let s = if col_arrays.is_empty() {
-        StructArray::new_empty_fields(batch.num_rows(), None)
-    } else {
-        StructArray::new(batch.schema().as_ref().to_owned().fields, col_arrays, None)
-    };
+    // // Can be simplified with StructArray::try_new_with_length in arrow 55.1
+    // let col_arrays = batch.columns().to_owned();
+    // let s = if col_arrays.is_empty() {
+    //     StructArray::new_empty_fields(batch.num_rows(), None)
+    // } else {
+    //     StructArray::new(batch.schema().as_ref().to_owned().fields, col_arrays, None)
+    // };
+    //
+    // let struct_array = cast_struct(&s, target_schema.fields(), &cast_options, add_missing)?;
 
-    let struct_array = cast_struct(&s, target_schema.fields(), &cast_options, add_missing)?;
+    // @HStack Fix schema mapping for record batches with an empty schema
+    let mut struct_array = StructArray::try_new_with_length(
+        batch.schema().as_ref().to_owned().fields,
+        batch.columns().to_owned(),
+        None,
+        batch.num_rows(),
+    )?;
+    struct_array = cast_struct(&struct_array, target_schema.fields(), &cast_options, add_missing)?;
+
 
     Ok(RecordBatch::try_new_with_options(
         target_schema,
