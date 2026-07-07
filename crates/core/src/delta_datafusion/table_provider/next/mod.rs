@@ -44,7 +44,7 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 use uuid::Uuid;
 
-pub use self::scan::DeltaScanExec;
+pub use self::scan::{DeltaScanExec, DeltaNextPhysicalCodec};
 pub(crate) use self::scan::KernelScanPlan;
 use self::scan::ProjectedScanContract;
 pub use self::scan::relax_schema_nested_nullability;
