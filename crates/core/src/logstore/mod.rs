@@ -423,6 +423,9 @@ pub trait LogStore: Send + Sync + AsAny {
 
     /// Get a kernel [`Engine`] backed by this log store's root object store.
     fn engine(&self) -> Arc<dyn Engine> {
+        if let Some(engine) = &self.config().options.engine {
+            return engine.0.clone();
+        }
         get_engine(self.root_object_store())
     }
 

@@ -10,6 +10,7 @@
 use ::object_store::RetryConfig;
 use object_store::{ObjectStore, path::Path, prefix::PrefixStore};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use super::storage::{CertificateConfig, LimitConfig};
 use super::{IORuntime, storage::runtime::RuntimeConfig};
@@ -92,12 +93,25 @@ where
     }
 }
 
+/// A cloneable reference to a runtime kernel engine.
+#[derive(Clone)]
+pub struct EngineRef(pub Arc<dyn delta_kernel::Engine>);
+
+impl std::fmt::Debug for EngineRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("EngineRef(..)")
+    }
+}
+
 /// Resolved configuration for constructing and decorating an object store backend.
 ///
 /// Aggregates the optional dedicated IO runtime, retry/limit/certificate settings and the raw
 /// passthrough options used to build the underlying [`ObjectStore`].
 #[derive(Default, Debug, Clone)]
 pub struct StorageConfig {
+    /// Optional runtime-only kernel engine override. This is not serialized.
+    pub engine: Option<EngineRef>,
+
     /// Runtime configuration.
     ///
     /// Configuration to set up a dedicated IO runtime to execute IO related operations or
