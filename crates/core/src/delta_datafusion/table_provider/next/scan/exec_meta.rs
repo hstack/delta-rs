@@ -79,7 +79,7 @@ pub(crate) struct DeltaScanMetaExec {
     /// Column name for the file id
     file_id_field: Option<FieldRef>,
     /// Maximum output rows per execution partition.
-    fetch: Option<usize>,
+    pub(super) fetch: Option<usize>,
     /// plan properties
     properties: Arc<PlanProperties>,
 }

@@ -600,7 +600,7 @@ impl DeltaScan {
     }
 
     /// Attach the runtime log store handle required for session setup on read paths and writes.
-    pub(crate) fn with_log_store(mut self, log_store: impl Into<LogStoreRef>) -> Self {
+    pub fn with_log_store(mut self, log_store: impl Into<LogStoreRef>) -> Self {
         self.log_store = Some(log_store.into());
         self
     }
