@@ -38,6 +38,7 @@ use datafusion::common::scalar::ScalarValue;
 use datafusion::common::{
     Column, DFSchema, DataFusionError, Result as DataFusionResult, TableReference, ToDFSchema,
 };
+use datafusion::common::tree_node::{Transformed, TreeNode};
 use datafusion::datasource::TableProvider;
 use datafusion::datasource::physical_plan::wrap_partition_type_in_dict;
 use datafusion::execution::TaskContext;
@@ -47,6 +48,8 @@ use datafusion::logical_expr::utils::conjunction;
 use datafusion::logical_expr::{Expr, Extension, LogicalPlan};
 use datafusion::physical_optimizer::pruning::PruningPredicate;
 use datafusion::physical_plan::ExecutionPlan;
+use datafusion_datasource::file_scan_config::{FileScanConfig, FileScanConfigBuilder};
+use datafusion_datasource::source::DataSourceExec;
 use datafusion_proto::logical_plan::LogicalExtensionCodec;
 use datafusion_proto::physical_plan::PhysicalExtensionCodec;
 use delta_kernel::engine::arrow_conversion::TryIntoArrow as _;
@@ -100,6 +103,7 @@ pub mod planner;
 mod session;
 pub use session::SessionFallbackPolicy;
 pub(crate) use session::{SessionResolveContext, resolve_session_state};
+use crate::delta_datafusion::expr_adapter::build_expr_adapter_factory;
 mod table_provider;
 pub use table_provider::next::relax_schema_nested_nullability;
 pub(crate) mod utils;
@@ -466,7 +470,41 @@ impl PhysicalExtensionCodec for DeltaPhysicalCodec {
     ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
         let wire: DeltaScanWire = serde_json::from_reader(buf)
             .map_err(|_| DataFusionError::Internal("Unable to decode DeltaScan".to_string()))?;
-        let delta_scan = wire.into_delta_scan((*inputs)[0].clone());
+
+        let delta_scan_input = (*inputs)[0].clone();
+        #[allow(clippy::collapsible_if)]
+
+        let new_delta_scan_input = delta_scan_input.transform(|plan| {
+            if let Some(ds_exec) = plan.downcast_ref::<DataSourceExec>() {
+                if let Some(file_conf) = ds_exec
+                    .data_source()
+                    .downcast_ref::<FileScanConfig>()
+                {
+                    let new_file_scan_config = FileScanConfigBuilder::from(file_conf.clone())
+                        .with_expr_adapter(build_expr_adapter_factory())
+                        .build();
+
+                    // DataSourceExec::from_data_source(new_file_scan_config)
+                    let new_plan = Arc::new(
+                        ds_exec
+                            .clone()
+                            .with_data_source(Arc::new(new_file_scan_config)),
+                    );
+                    Ok(Transformed::yes(new_plan))
+                } else {
+                    Ok(Transformed::no(plan))
+                }
+            } else {
+                Ok(Transformed::no(plan))
+            }
+        }).expect("new plan").data;
+
+        let delta_scan = DeltaScan::new(
+            &wire.table_url,
+            wire.config,
+            new_delta_scan_input,
+            wire.logical_schema,
+        );
         Ok(Arc::new(delta_scan))
     }
 
