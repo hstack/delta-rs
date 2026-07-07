@@ -88,6 +88,7 @@
 pub mod data_catalog;
 pub mod datafile;
 pub mod errors;
+pub mod hacks;
 pub mod kernel;
 pub mod logstore;
 pub mod operations;
