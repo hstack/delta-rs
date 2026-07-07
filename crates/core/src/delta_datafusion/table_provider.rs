@@ -524,15 +524,15 @@ pub(crate) fn update_datafusion_session(
 #[derive(Debug)]
 pub(super) struct DeltaScan {
     /// The normalized [Url] of the ObjectStore root
-    table_url: Url,
+    pub table_url: Url,
     /// Column that contains an index that maps to the original metadata Add
-    config: DeltaScanConfig,
+    pub config: DeltaScanConfig,
     /// The parquet scan to wrap
-    parquet_scan: Arc<dyn ExecutionPlan>,
+    pub parquet_scan: Arc<dyn ExecutionPlan>,
     /// The schema of the table to be used when evaluating expressions
-    logical_schema: Arc<Schema>,
+    pub logical_schema: Arc<Schema>,
     /// Metrics for scan reported via DataFusion
-    metrics: ExecutionPlanMetricsSet,
+    pub metrics: ExecutionPlanMetricsSet,
 }
 
 impl DeltaScan {
@@ -556,9 +556,9 @@ impl DeltaScan {
 #[derive(Debug, Serialize, Deserialize)]
 pub(super) struct DeltaScanWire {
     /// This [Url] should have already been passed through [normalize_table_url]
-    table_url: Url,
-    config: DeltaScanConfig,
-    logical_schema: Arc<Schema>,
+    pub(crate) table_url: Url,
+    pub(crate) config: DeltaScanConfig,
+    pub(crate) logical_schema: Arc<Schema>,
 }
 
 impl From<&DeltaScan> for DeltaScanWire {
