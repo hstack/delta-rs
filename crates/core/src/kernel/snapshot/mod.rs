@@ -201,7 +201,7 @@ impl<'a> ConflictReadSet<'a> {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Snapshot {
     /// Log segment containing all log files in the snapshot
-    pub(crate) inner: Arc<KernelSnapshot>,
+    pub inner: Arc<KernelSnapshot>,
     /// Optional materialized replay state owned by this snapshot.
     materialized_files: Option<Arc<MaterializedFiles>>,
     /// Metrics captured during snapshot loading
@@ -1254,7 +1254,8 @@ impl MaterializedFiles {
 /// A snapshot of a Delta table that has been eagerly loaded into memory.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EagerSnapshot {
-    snapshot: Arc<Snapshot>,
+    /// The underlying table snapshot.
+    pub snapshot: Arc<Snapshot>,
 }
 
 /// Read `_last_checkpoint` and return the hinted version when present.
