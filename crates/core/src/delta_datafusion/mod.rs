@@ -108,6 +108,7 @@ mod table_provider;
 pub use table_provider::next::relax_schema_nested_nullability;
 pub(crate) mod utils;
 mod expr_adapter;
+pub mod table_provider_old;
 
 impl From<DeltaTableError> for DataFusionError {
     fn from(err: DeltaTableError) -> Self {
