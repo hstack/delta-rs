@@ -17,13 +17,13 @@ repository = "https://github.com/delta-io/delta.rs"
 
 [workspace.dependencies]
 #delta_kernel = { package = "buoyant_kernel", path = "../delta-kernel-rs/kernel", features = [
-delta_kernel = { package = "buoyant_kernel", git = "https://github.com/buoyant-data/delta-kernel-rs", branch = "buoyant/main", features = [
+delta_kernel = { package = "buoyant_kernel", git = "https://github.com/hstack/delta-kernel-rs", branch = "buoyant-v0.25.1", features = [
 #delta_kernel = { package = "buoyant_kernel", version = "0.25.0,<0.25.100", features = [
     "arrow-58",
     "internal-api",
 ] }
 #delta_kernel_default_engine = {  package = "buoyant_kernel_engine",  path = "../delta-kernel-rs/default-engine", features = ["arrow-58", "rustls"], default-features = false }
-delta_kernel_default_engine = {  package = "buoyant_kernel_engine",  git = "https://github.com/buoyant-data/delta-kernel-rs", branch = "buoyant/main", features = ["arrow-58", "rustls"], default-features = false }
+delta_kernel_default_engine = {  package = "buoyant_kernel_engine",  git = "https://github.com/hstack/delta-kernel-rs", branch = "buoyant-v0.25.1", features = ["arrow-58", "rustls"], default-features = false }
 #delta_kernel_default_engine = {  package = "buoyant_kernel_engine",  version = "0.25.0,<0.25.100", features = ["arrow-58", "rustls"], default-features = false }
 
 
@@ -160,3 +160,41 @@ inherits = "release"
 opt-level = 3
 codegen-units = 1
 lto = "thin"
+
+[patch.crates-io]
+datafusion = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-54' }
+datafusion-catalog = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-54' }
+datafusion-catalog-listing = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-54' }
+datafusion-common = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-54' }
+datafusion-common-runtime = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-54' }
+datafusion-datasource = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-54' }
+datafusion-datasource-avro = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-54' }
+datafusion-datasource-csv = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-54' }
+datafusion-datasource-json = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-54' }
+datafusion-datasource-parquet = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-54' }
+datafusion-execution = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-54' }
+datafusion-expr = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-54' }
+datafusion-expr-common = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-54' }
+datafusion-ffi = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-54' }
+datafusion-functions = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-54' }
+datafusion-functions-aggregate = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-54' }
+datafusion-functions-aggregate-common = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-54' }
+datafusion-functions-nested = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-54' }
+datafusion-functions-table = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-54' }
+datafusion-functions-window = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-54' }
+datafusion-functions-window-common = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-54' }
+datafusion-optimizer = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-54' }
+datafusion-physical-expr = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-54' }
+datafusion-physical-expr-adapter = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-54' }
+datafusion-physical-expr-common = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-54' }
+datafusion-physical-optimizer = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-54' }
+datafusion-pruning = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-54' }
+datafusion-physical-plan = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-54' }
+datafusion-proto = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-54' }
+datafusion-proto-common = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-54' }
+datafusion-session = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-54' }
+datafusion-spark = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-54' }
+datafusion-sql = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-54' }
+datafusion-substrait = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-54' }
+buoyant_kernel = { git = 'https://github.com/hstack/delta-kernel-rs.git', branch = 'buoyant-v0.25.1' }
+#buoyant_kernel = { path = "../delta-kernel-rs-main-024/kernel" }
