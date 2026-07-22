@@ -38,7 +38,7 @@ impl PhysicalExprAdapterFactory for DeltaPhysicalExprAdapterFactory {
 /// as is: the default adapter already tolerates nullable file columns feeding
 /// non-nullable top-level table columns, and keeping it strict preserves the
 /// "non-nullable column missing from file" error for missing top-level columns.
-pub(super) fn relax_schema_nested_nullability(schema: &Schema) -> Schema {
+pub fn relax_schema_nested_nullability(schema: &Schema) -> Schema {
     let fields: Vec<FieldRef> = schema
         .fields()
         .iter()

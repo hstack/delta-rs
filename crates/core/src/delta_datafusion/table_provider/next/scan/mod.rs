@@ -65,7 +65,8 @@ use url::Url;
 
 pub use self::exec::DeltaScanExec;
 use self::exec_meta::DeltaScanMetaExec;
-use self::expr_adapter::{DeltaPhysicalExprAdapterFactory, relax_schema_nested_nullability};
+use self::expr_adapter::{DeltaPhysicalExprAdapterFactory};
+pub use self::expr_adapter::relax_schema_nested_nullability;
 pub(crate) use self::plan::{KernelScanPlan, ProjectedScanContract, supports_filters_pushdown};
 use self::replay::{ScanFileContext, ScanFileStream};
 use super::{FileSelection, ResolvedFileSelection};

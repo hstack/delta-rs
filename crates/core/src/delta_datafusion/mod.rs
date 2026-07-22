@@ -101,7 +101,9 @@ mod session;
 pub use session::SessionFallbackPolicy;
 pub(crate) use session::{SessionResolveContext, resolve_session_state};
 mod table_provider;
+pub use table_provider::next::relax_schema_nested_nullability;
 pub(crate) mod utils;
+mod expr_adapter;
 
 impl From<DeltaTableError> for DataFusionError {
     fn from(err: DeltaTableError) -> Self {

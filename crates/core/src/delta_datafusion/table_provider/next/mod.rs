@@ -47,6 +47,7 @@ use uuid::Uuid;
 pub use self::scan::DeltaScanExec;
 pub(crate) use self::scan::KernelScanPlan;
 use self::scan::ProjectedScanContract;
+pub use self::scan::relax_schema_nested_nullability;
 use super::data_sink::DeltaDataSink;
 use crate::DeltaTableError;
 use crate::delta_datafusion::DeltaScanConfig;
