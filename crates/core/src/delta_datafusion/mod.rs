@@ -79,6 +79,7 @@ pub(crate) use data_validation::{
 pub use engine::DataFusionEngine;
 pub use find_files::extract_partition_only_predicate;
 pub(crate) use find_files::*;
+pub use find_files::extract_partition_only_predicate;
 pub(crate) use table_provider::next::normalize_path_as_file_id;
 pub use table_provider::{
     DeltaScanConfig, DeltaScanConfigBuilder, TableProviderBuilder, next::DeltaScanExec,
