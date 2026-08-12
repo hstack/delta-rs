@@ -77,6 +77,7 @@ pub(crate) use data_validation::{
     DataValidationExec, constraints_to_exprs, generated_columns_to_exprs, validation_predicates,
 };
 pub use engine::DataFusionEngine;
+pub use find_files::extract_partition_only_predicate;
 pub(crate) use find_files::*;
 pub(crate) use table_provider::next::normalize_path_as_file_id;
 pub use table_provider::{

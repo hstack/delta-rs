@@ -215,7 +215,7 @@ impl TreeNodeVisitor<'_> for FindFilesExprProperties {
 /// rather than materializing every partition column — which avoids coercing values the
 /// predicate never reads and prevents an unrelated/malformed partition value from
 /// weakening pruning.
-pub(crate) fn extract_partition_only_predicate(
+pub fn extract_partition_only_predicate(
     predicate: Expr,
     partition_columns: &[String],
 ) -> DeltaResult<Option<(Expr, Vec<String>)>> {
