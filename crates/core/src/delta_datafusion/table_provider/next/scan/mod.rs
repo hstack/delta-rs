@@ -46,6 +46,7 @@ use datafusion::{
     },
     prelude::Expr,
 };
+use datafusion::logical_expr::TableProviderFilterPushDown;
 use datafusion_datasource::{
     PartitionedFile, TableSchema, compute_all_files_statistics, file_groups::FileGroup,
     file_scan_config::FileScanConfigBuilder, source::DataSourceExec,
@@ -81,6 +82,7 @@ use crate::{
     kernel::LogicalFileView,
 };
 use crate::delta_datafusion::schema_null::rewrite_schema_with_nullable_fields;
+use crate::delta_datafusion::table_provider::next::scan::limit::LimitPruneState;
 
 mod exec;
 mod exec_meta;
@@ -88,6 +90,7 @@ mod expr_adapter;
 mod plan;
 mod replay;
 mod codec;
+pub mod limit;
 
 type ScanMetadataStream = Pin<Box<dyn Stream<Item = Result<ScanMetadata, DeltaTableError>> + Send>>;
 type PublicFileIdMap = HashMap<String, String>;
@@ -117,7 +120,24 @@ pub(super) async fn execution_plan(
         )));
     }
 
-    let replayed = replay_files(engine, &scan_plan, config.clone(), stream, file_selection).await?;
+    // File-level limit pruning is safe iff:
+    // - the caller asked for a row cap,
+    // - no explicit FileSelection is in play (explicit pins win), and
+    // - every filter is marked Exact (DataFusion's own contract already forbids
+    //   passing `Some(N)` here when an Inexact filter would survive above the
+    //   scan; this check is a defensive duplicate so the invariant is local).
+    let prune_by_limit: Option<usize> = limit.filter(|_| {
+        file_selection.is_none() && {
+            let filter_refs: Vec<&Expr> = scan_plan.filters.iter().collect();
+            let pushdown =
+                supports_filters_pushdown(&filter_refs, scan_plan.table_configuration(), config);
+            pushdown
+                .iter()
+                .all(|p| matches!(p, TableProviderFilterPushDown::Exact))
+        }
+    });
+
+    let replayed = replay_files(engine, &scan_plan, config.clone(), stream, file_selection, prune_by_limit).await?;
 
     let file_id_field = scan_plan.contract.file_id_field.clone();
     if scan_plan.is_metadata_only() && !scan_plan.contract.retain_row_index {
@@ -309,6 +329,7 @@ async fn replay_files(
     scan_config: DeltaScanConfig,
     stream: ScanMetadataStream,
     file_selection: Option<&ResolvedFileSelection>,
+    prune_by_limit: Option<usize>,
 ) -> Result<ReplayedScanFiles> {
     let mut stream = ScanFileStream::new(
         engine,
@@ -317,10 +338,34 @@ async fn replay_files(
         file_selection.map(|selection| &selection.active_file_ids),
         stream,
     );
-    let mut files = Vec::new();
-    while let Some(file) = stream.try_next().await? {
-        files.extend(file);
-    }
+    // let mut files = Vec::new();
+    // while let Some(file) = stream.try_next().await? {
+    //     files.extend(file);
+    // }
+
+    let mut files = if let Some(cap) = prune_by_limit {
+        let mut state = LimitPruneState::new(cap);
+        'outer: while let Some(batch_files) = stream.try_next().await? {
+            for file in batch_files {
+                if state.accept(file) {
+                    break 'outer;
+                }
+            }
+        }
+        // The second tuple element (unknown-pool drops) is a subset of
+        // `count_files_pruned_by_limit`, which we compute below from the
+        // stream's total visit count minus the final file set. That formula
+        // also captures files in the partially-consumed final batch that we
+        // dropped on early-break without going through the unknown pool.
+        let (kept, _) = state.finalize();
+        kept
+    } else {
+        let mut files = Vec::new();
+        while let Some(batch_files) = stream.try_next().await? {
+            files.extend(batch_files);
+        }
+        files
+    };
 
     let mut public_file_ids = PublicFileIdMap::default();
     if scan_plan.contract.retain_file_id {
@@ -353,6 +398,10 @@ async fn replay_files(
     MetricBuilder::new(&metrics)
         .global_counter("count_files_scanned")
         .add(stream.metrics.num_scanned);
+    let pruned_by_limit = stream.metrics.num_scanned.saturating_sub(files.len());
+    MetricBuilder::new(&metrics)
+        .global_counter("count_files_pruned_by_limit")
+        .add(pruned_by_limit);
 
     Ok(ReplayedScanFiles {
         files,
@@ -1051,6 +1100,7 @@ mod tests {
             transform: None,
             stats: Statistics::new_unknown(&Schema::empty()),
             partitions: None,
+            has_deletion_vector: false,
         }
     }
 

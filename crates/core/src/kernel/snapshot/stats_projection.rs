@@ -117,6 +117,10 @@ impl FileStatsMaterialization {
         self.stats_source_policy
     }
 
+    pub(crate) fn raw_stats_policy(&self) -> RawStatsPolicy {
+        self.raw_stats_policy
+    }
+
     pub(crate) fn preserves_raw_stats(&self) -> bool {
         self.raw_stats_policy == RawStatsPolicy::Preserve
     }
