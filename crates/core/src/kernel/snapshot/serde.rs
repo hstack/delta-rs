@@ -162,6 +162,9 @@ impl MaterializedFilesWire {
         let materialized_files = MaterializedFiles {
             identity,
             policy,
+            stats_parsed_schema: owning_snapshot
+                .materialized_stats_parsed_schema()
+                .map_err(|err| err.to_string())?,
             scope,
             existing_predicate: None,
             batches: deserialize_batches(self.batches)?.into(),
@@ -192,10 +195,10 @@ fn materialized_files_from_legacy_eager_payload(
         return Ok(None);
     }
 
-    Ok(Some(Arc::new(MaterializedFiles::full(
-        snapshot,
-        deserialize_batches(legacy_payload)?,
-    ))))
+    Ok(Some(Arc::new(
+        MaterializedFiles::full(snapshot, deserialize_batches(legacy_payload)?)
+            .map_err(|err| err.to_string())?,
+    )))
 }
 
 fn serialize_batches(batches: &[arrow_array::RecordBatch]) -> Result<Vec<u8>, String> {
@@ -291,6 +294,9 @@ impl Serialize for Snapshot {
             .transpose()
             .map_err(serde::ser::Error::custom)?;
         seq.serialize_element(&materialized_files)?;
+        if self.checkpoint_stats_json_fallback {
+            seq.serialize_element(&self.checkpoint_stats_json_fallback)?;
+        }
 
         seq.end()
     }
@@ -335,6 +341,8 @@ struct LegacySnapshotConfig {
     require_files: bool,
     #[serde(default, alias = "skip_stats")]
     skip_stats: bool,
+    #[serde(default)]
+    checkpoint_stats_json_fallback: bool,
 }
 
 // Retain the legacy loading policy while decoding an eager payload.
@@ -407,6 +415,11 @@ impl<'de> Visitor<'de> for SnapshotVisitor {
                 None,
             ),
         };
+        let checkpoint_stats_json_fallback = seq.next_element()?.unwrap_or_else(|| {
+            legacy_config
+                .as_ref()
+                .is_some_and(|config| config.checkpoint_stats_json_fallback)
+        });
 
         let ascending_commit_files = ascending_commit_files
             .into_iter()
@@ -478,6 +491,7 @@ impl<'de> Visitor<'de> for SnapshotVisitor {
             inner: Arc::new(snapshot),
             materialized_files: None,
             load_metrics,
+            checkpoint_stats_json_fallback,
         };
         let materialized_files = materialized_files
             // Reject legacy caches without statistics because the current contract includes them.

@@ -27,9 +27,11 @@ use crate::kernel::scalars::ScalarExt;
 use crate::kernel::{Add, DeletionVectorDescriptor, Remove};
 use crate::{DeltaResult, DeltaTableError};
 
-pub(crate) use self::scan_row::{ScanRowOutStream, scan_row_in_eval_for_schema};
+pub(crate) use self::scan_row::ScanRowOutStream;
+pub(crate) use self::scan_row_cached::CachedScanRowEvaluator;
 
 mod scan_row;
+mod scan_row_cached;
 mod tombstones;
 
 const FIELD_NAME_PATH: &str = "path";

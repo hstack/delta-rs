@@ -12,6 +12,9 @@ use url::Url;
 
 use super::normalize_table_url;
 use crate::kernel::Version;
+use crate::kernel::snapshot::{
+    CHECKPOINT_STATS_JSON_FALLBACK, take_checkpoint_stats_json_fallback,
+};
 pub use crate::logstore::config::EngineRef;
 use crate::logstore::storage::IORuntime;
 use crate::logstore::{LogStoreRef, StorageConfig, object_store_factories};
@@ -80,6 +83,19 @@ impl DeltaTableBuilder {
     /// Sets `version` to the builder
     pub fn with_version(mut self, version: Version) -> Self {
         self.version = DeltaVersion::Version(version);
+        self
+    }
+
+    /// Allow parsed checkpoint statistics to fall back to JSON statistics.
+    ///
+    /// Disabled by default. This does not change statistics read from JSON commits.
+    pub fn with_checkpoint_stats_json_fallback(mut self, enabled: bool) -> Self {
+        self.storage_options
+            .get_or_insert_with(HashMap::new)
+            .insert(
+                CHECKPOINT_STATS_JSON_FALLBACK.to_string(),
+                enabled.to_string(),
+            );
         self
     }
 
@@ -186,6 +202,9 @@ impl DeltaTableBuilder {
     pub fn build_storage(&self) -> DeltaResult<LogStoreRef> {
         debug!("build_storage() with {}", self.table_url);
 
+        let raw_options = self.storage_options();
+        let mut storage_options = raw_options.clone();
+        take_checkpoint_stats_json_fallback(&mut storage_options)?;
         let mut storage_config = StorageConfig::parse_options(self.storage_options())?;
         storage_config.engine = self.engine.clone();
         if let Some(io_runtime) = self.io_runtime.clone() {
@@ -643,6 +662,21 @@ mod tests {
             let found_opts = table.storage_options();
             assert_eq!(expected, found_opts.get(key).unwrap());
         }
+    }
+
+    #[test]
+    fn test_invalid_checkpoint_stats_json_fallback_returns_error() {
+        let result = DeltaTableBuilder::from_url(Url::parse("memory:///").unwrap())
+            .unwrap()
+            .with_storage_options(HashMap::from([(
+                "deltalake.checkpoint_stats_json_fallback".to_string(),
+                "invalid".to_string(),
+            )]))
+            .build();
+        assert!(
+            result.is_err(),
+            "invalid checkpoint stats fallback must be rejected"
+        );
     }
 
     #[test]

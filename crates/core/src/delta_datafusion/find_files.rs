@@ -210,7 +210,7 @@ impl TreeNodeVisitor<'_> for FindFilesExprProperties {
 /// rather than materializing every partition column — which avoids coercing values the
 /// predicate never reads and prevents an unrelated/malformed partition value from
 /// weakening pruning.
-pub(crate) fn extract_partition_only_predicate(
+pub fn extract_partition_only_predicate(
     predicate: Expr,
     partition_columns: &[String],
 ) -> DeltaResult<Option<(Expr, Vec<String>)>> {
@@ -818,10 +818,12 @@ mod tests {
         );
         assert_eq!(lazy_result.candidates.len(), 1);
         let candidate = &lazy_result.candidates[0];
-        assert_eq!(
-            serde_json::to_value(candidate)?,
-            serde_json::to_value(source_add)?
-        );
+        // HSTACK: Regenerated stats can use a different JSON key order.
+        let mut actual = serde_json::to_value(&candidate)?;
+        let mut expected = serde_json::to_value(&source_add)?;
+        actual["stats"] = serde_json::from_str(actual["stats"].as_str().unwrap())?;
+        expected["stats"] = serde_json::from_str(expected["stats"].as_str().unwrap())?;
+        assert_eq!(actual, expected);
         assert!(!lazy.has_materialized_files_for_test());
 
         Ok(())

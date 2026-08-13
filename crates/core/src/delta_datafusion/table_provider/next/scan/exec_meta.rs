@@ -1156,11 +1156,13 @@ mod tests {
                     .create_physical_plan()
                     .await?;
                 let plan_str = displayable(plan.as_ref()).indent(true).to_string();
+                // HSTACK: LIMIT 2 prunes this fixture to one three-row file.
+                let expected_partitions = if clause == "LIMIT 2" { 1 } else { partitions };
                 let has_expected_scan = plan.exists(|node| {
                     Ok(node
                         .downcast_ref::<DeltaScanMetaExec>()
                         .is_some_and(|exec| {
-                            exec.input.len() == partitions
+                            exec.input.len() == expected_partitions
                                 && (clause != "LIMIT 2" || exec.fetch() == Some(2))
                         }))
                 })?;
@@ -1170,7 +1172,10 @@ mod tests {
                     expected,
                     "{clause}, target_partitions={partitions}\n{plan_str}"
                 );
-                assert!(has_expected_scan, "{plan_str}");
+                assert!(
+                    has_expected_scan,
+                    "{clause}, target_partitions={partitions}\n{plan_str}"
+                );
             }
         }
         Ok(())
