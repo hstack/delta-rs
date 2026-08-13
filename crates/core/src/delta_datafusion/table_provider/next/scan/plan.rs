@@ -37,6 +37,7 @@ use crate::delta_datafusion::DeltaScanConfig;
 use crate::delta_datafusion::engine::{
     to_datafusion_expr, to_delta_expression, to_delta_predicate,
 };
+use crate::delta_datafusion::schema_null::rewrite_schema_with_nullable_fields;
 use crate::delta_datafusion::table_provider::next::FILE_ID_COLUMN_DEFAULT;
 use crate::kernel::{Scan, Snapshot};
 
@@ -321,10 +322,16 @@ impl KernelScanPlan {
         } else {
             Arc::new(scan_builder.build()?)
         };
-        let parquet_read_schema = config.physical_arrow_schema(
+        // let parquet_read_schema = config.physical_arrow_schema(
+        //     scan.snapshot().table_configuration(),
+        //     &scan.physical_schema().as_ref().try_into_arrow()?,
+        // )?;
+        let mut parquet_read_schema = config.physical_arrow_schema(
             scan.snapshot().table_configuration(),
             &scan.physical_schema().as_ref().try_into_arrow()?,
-        )?;
+            )?;
+        parquet_read_schema = rewrite_schema_with_nullable_fields(parquet_read_schema);
+
         let parquet_predicate_schema =
             build_parquet_predicate_schema(&parquet_read_schema, &contract.file_id_field);
         Ok(Self {
