@@ -27,9 +27,11 @@ use crate::kernel::scalars::ScalarExt;
 use crate::kernel::{Add, DeletionVectorDescriptor, Remove};
 use crate::{DeltaResult, DeltaTableError};
 
-pub(crate) use self::scan_row::{ScanRowOutStream, scan_row_in_eval};
+pub(crate) use self::scan_row::ScanRowOutStream;
+pub(crate) use self::scan_row_cached::CachedScanRowEvaluator;
 
 mod scan_row;
+mod scan_row_cached;
 mod tombstones;
 
 const FIELD_NAME_PATH: &str = "path";
@@ -376,7 +378,7 @@ impl LogicalFileView {
     pub fn add_action(&self) -> Add {
         self.to_add()
     }
-    
+
     /// Converts this file view into an Add action for log operations.
     /// FIXME: Double json > stats conversion TOO EXPENSIVE
     pub(crate) fn add_action_no_stats(&self) -> Add {

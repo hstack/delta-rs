@@ -19,9 +19,9 @@ use tracing::{debug, warn};
 
 #[cfg(test)]
 use super::Snapshot;
-use crate::DeltaResult;
 use crate::kernel::SCAN_ROW_ARROW_SCHEMA;
 use crate::kernel::arrow::engine_ext::{SnapshotExt, is_public_min_max_stats_eligible_primitive};
+use crate::{DeltaResult, DeltaTableError};
 
 pub(crate) const FIELD_MAX_VALUES: &str = "maxValues";
 pub(crate) const FIELD_MIN_VALUES: &str = "minValues";
@@ -119,6 +119,10 @@ impl FileStatsMaterialization {
 
     pub(crate) fn stats_source_policy(&self) -> StatsSourcePolicy {
         self.stats_source_policy
+    }
+
+    pub(crate) fn raw_stats_policy(&self) -> RawStatsPolicy {
+        self.raw_stats_policy
     }
 
     pub(crate) fn preserves_raw_stats(&self) -> bool {
@@ -382,6 +386,34 @@ fn physicalize_column_path(
     }
 
     Some(ColumnName::new(physical_path))
+}
+
+pub(super) fn logicalize_column_path(
+    schema: &StructType,
+    column: &ColumnName,
+    column_mapping_mode: ColumnMappingMode,
+) -> DeltaResult<ColumnName> {
+    let mut current = schema;
+    let mut logical_path = Vec::with_capacity(column.path().len());
+    let mut path = column.path().iter().peekable();
+    while let Some(segment) = path.next() {
+        let field = current
+            .fields()
+            .find(|field| field.physical_name(column_mapping_mode) == segment.as_str())
+            .ok_or_else(|| DeltaTableError::SchemaMismatch {
+                msg: format!("physical statistics column {column} is not in the table schema"),
+            })?;
+        logical_path.push(field.name().clone());
+        if path.peek().is_some() {
+            let DataType::Struct(inner) = field.data_type() else {
+                return Err(DeltaTableError::SchemaMismatch {
+                    msg: format!("physical statistics column {column} is not a struct path"),
+                });
+            };
+            current = inner.as_ref();
+        }
+    }
+    Ok(ColumnName::new(logical_path))
 }
 
 fn stats_schema_contains_data_column(stats_schema: &StructType, column: &ColumnName) -> bool {

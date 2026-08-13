@@ -13,6 +13,9 @@ use url::Url;
 use super::normalize_table_url;
 use crate::kernel::Version;
 use crate::kernel::size_limits::LogSizeLimiter;
+use crate::kernel::snapshot::{
+    CHECKPOINT_STATS_JSON_FALLBACK, take_checkpoint_stats_json_fallback,
+};
 pub use crate::logstore::config::EngineRef;
 use crate::logstore::storage::IORuntime;
 use crate::logstore::{LogStoreRef, StorageConfig, object_store_factories};
@@ -86,6 +89,19 @@ impl DeltaTableBuilder {
     /// Limit the total size of checkpoint and commit files loaded for a snapshot.
     pub fn with_log_size_limiter(mut self, limiter: LogSizeLimiter) -> Self {
         limiter.write_storage_options(self.storage_options.get_or_insert_with(HashMap::new));
+        self
+    }
+
+    /// Allow parsed checkpoint statistics to fall back to JSON statistics.
+    ///
+    /// Disabled by default. This does not change statistics read from JSON commits.
+    pub fn with_checkpoint_stats_json_fallback(mut self, enabled: bool) -> Self {
+        self.storage_options
+            .get_or_insert_with(HashMap::new)
+            .insert(
+                CHECKPOINT_STATS_JSON_FALLBACK.to_string(),
+                enabled.to_string(),
+            );
         self
     }
 
@@ -202,6 +218,7 @@ impl DeltaTableBuilder {
         let raw_options = self.storage_options();
         let mut storage_options = raw_options.clone();
         LogSizeLimiter::from_storage_options(&mut storage_options)?;
+        take_checkpoint_stats_json_fallback(&mut storage_options)?;
         let mut storage_config = StorageConfig::parse_options(storage_options)?;
         // Retain table-load options for snapshot loading and log store serialization.
         storage_config.raw = raw_options;
@@ -662,6 +679,21 @@ mod tests {
             let found_opts = table.storage_options();
             assert_eq!(expected, found_opts.get(key).unwrap());
         }
+    }
+
+    #[test]
+    fn test_invalid_checkpoint_stats_json_fallback_returns_error() {
+        let result = DeltaTableBuilder::from_url(Url::parse("memory:///").unwrap())
+            .unwrap()
+            .with_storage_options(HashMap::from([(
+                "deltalake.checkpoint_stats_json_fallback".to_string(),
+                "invalid".to_string(),
+            )]))
+            .build();
+        assert!(
+            result.is_err(),
+            "invalid checkpoint stats fallback must be rejected"
+        );
     }
 
     #[test]

@@ -912,6 +912,7 @@ mod tests {
         fs::File,
         sync::{Arc, Mutex},
     };
+    use tracing::info;
     use url::Url;
 
     use super::*;
@@ -990,6 +991,7 @@ mod tests {
     struct DeltaScanVisitor {
         num_scanned: Option<usize>,
         total_bytes_scanned: Option<usize>,
+        num_pruned_by_limit: Option<usize>,
     }
 
     impl DeltaScanVisitor {
@@ -1003,6 +1005,9 @@ mod tests {
 
             self.num_scanned = metrics
                 .sum_by_name("count_files_scanned")
+                .map(|v| v.as_usize());
+            self.num_pruned_by_limit = metrics
+                .sum_by_name("count_files_pruned_by_limit")
                 .map(|v| v.as_usize());
 
             Ok(true)
@@ -3032,7 +3037,10 @@ mod tests {
             for predicate in [None, Some(col("id").gt(lit(0i64)))] {
                 let provider = DeltaScan::new(snapshot.clone(), DeltaScanConfig::default())?
                     .with_file_skipping_predicate(predicate.clone());
-                let deletion_vectors = provider.deletion_vectors(&state).await?;
+                let deletion_vectors = provider
+                    .deletion_vectors(&state)
+                    .await
+                    .map_err(|err| format!("{name} scan with predicate {predicate:?}: {err}"))?;
                 assert_eq!(deletion_vectors.len(), 1);
                 assert!(deletion_vectors[0].filepath.ends_with(
                     "part-00000-cb251d5e-b665-437a-a9a7-fbfc5137c77d.c000.snappy.parquet"
@@ -3041,6 +3049,66 @@ mod tests {
                     deletion_vectors[0].keep_mask, expected,
                     "{name} scan with predicate {predicate:?}"
                 );
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_limit_pushdown_discards_pruned_deletion_vectors() -> TestResult {
+        use arrow::datatypes::Int32Type;
+
+        let temp_dir = tempfile::tempdir()?;
+        fs_extra::dir::copy(
+            TestTables::WithDvSmall.as_path(),
+            temp_dir.path(),
+            &Default::default(),
+        )?;
+        let table_url =
+            Url::from_directory_path(temp_dir.path().join("table-with-dv-small").canonicalize()?)
+                .map_err(|_| "invalid fixture directory")?;
+        let table = crate::open_table(table_url).await?;
+        let batch = RecordBatch::try_new(
+            Arc::new(ArrowSchema::new(vec![ArrowField::new(
+                "value",
+                ArrowDataType::Int32,
+                true,
+            )])),
+            vec![Arc::new(Int32Array::from(vec![50]))],
+        )?;
+        let table = table.write(vec![batch]).await?;
+        // Put both adds in one commit so replay starts the DV load before LIMIT stops it.
+        let log_dir = temp_dir.path().join("table-with-dv-small/_delta_log");
+        let appended_commit = log_dir.join("00000000000000000002.json");
+        let mut mixed_commit = std::fs::read_to_string(log_dir.join("00000000000000000001.json"))?;
+        for line in std::fs::read_to_string(&appended_commit)?.lines() {
+            let action: serde_json::Value = serde_json::from_str(line)?;
+            if action.get("add").is_some() {
+                mixed_commit.push('\n');
+                mixed_commit.push_str(line);
+            }
+        }
+        std::fs::write(log_dir.join("00000000000000000001.json"), mixed_commit)?;
+        std::fs::remove_file(appended_commit)?;
+        let snapshot = Snapshot::try_new(table.log_store().as_ref(), None).await?;
+        let provider =
+            DeltaScan::new(snapshot, DeltaScanConfig::default())?.with_log_store(table.log_store());
+        let session = Arc::new(create_session().into_inner());
+        let state = session.state_ref().read().clone();
+
+        for (limit, expected_rows) in [(1, 1), (20, 9)] {
+            let plan = provider.scan(&state, None, &[], Some(limit)).await?;
+            let batches = collect_partitioned(plan, session.task_ctx()).await?;
+            let rows: usize = batches.iter().flatten().map(RecordBatch::num_rows).sum();
+            assert_eq!(rows, expected_rows);
+            if limit == 1 {
+                let values: Vec<_> = batches
+                    .iter()
+                    .flatten()
+                    .flat_map(|batch| batch.column(0).as_primitive::<Int32Type>().values())
+                    .copied()
+                    .collect();
+                assert_eq!(values, vec![50]);
             }
         }
         Ok(())
@@ -3326,6 +3394,241 @@ mod tests {
             times[0],
             times[times.len() - 1]
         );
+        Ok(())
+    }
+
+    /// LIMIT 1 with no filters: pruning fires, only one file reaches the Parquet reader.
+    #[tokio::test]
+    async fn test_limit_pushdown_runtime_filter_does_not_trim_files() -> TestResult {
+        let table = create_in_memory_id_table_with_rows(vec![1]).await?;
+        let batch = RecordBatch::try_new(
+            Arc::new(ArrowSchema::new(vec![ArrowField::new(
+                "id",
+                ArrowDataType::Int64,
+                true,
+            )])),
+            vec![Arc::new(Int64Array::from(vec![2]))],
+        )?;
+        let table = table.write(vec![batch]).await?;
+        let filter = RuntimeFileFilter::default();
+        let provider = DeltaScan::builder()
+            .with_log_store(table.log_store())
+            .build()
+            .await?
+            .with_runtime_file_filter(Arc::clone(&filter));
+        let session = create_session().into_inner();
+        let plan = provider.scan(&session.state(), None, &[], Some(1)).await?;
+        filter.set(vec![col("id").eq(lit(2_i64))]).unwrap();
+        let batches = datafusion::physical_plan::collect(plan, session.task_ctx()).await?;
+        assert_batches_sorted_eq!(["+----+", "| id |", "+----+", "| 2  |", "+----+"], &batches);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_limit_pushdown_no_filter_trims_files() -> TestResult {
+        let id_schema = Arc::new(ArrowSchema::new(vec![ArrowField::new(
+            "id",
+            ArrowDataType::Int64,
+            true,
+        )]));
+
+        // Three single-row files, one per write.
+        let table = create_in_memory_id_table_with_rows(vec![1]).await?;
+        let table = table
+            .write(vec![RecordBatch::try_new(
+                id_schema.clone(),
+                vec![Arc::new(Int64Array::from(vec![2]))],
+            )?])
+            .await?;
+        let table = table
+            .write(vec![RecordBatch::try_new(
+                id_schema,
+                vec![Arc::new(Int64Array::from(vec![3]))],
+            )?])
+            .await?;
+
+        let provider = DeltaScan::builder()
+            .with_log_store(table.log_store())
+            .build()
+            .await?;
+        let session = Arc::new(create_session().into_inner());
+        let state = session.state_ref().read().clone();
+
+        let plan = provider.scan(&state, None, &[], Some(1)).await?;
+
+        let mut visitor = DeltaScanVisitor::default();
+        visit_execution_plan(plan.as_ref(), &mut visitor).unwrap();
+        // The headline invariant: file-level pruning kicked in, so only one file
+        // made it into the scan plan even though three exist in the snapshot.
+        assert_eq!(
+            visitor.num_scanned,
+            Some(1),
+            "LIMIT 1 should prune to exactly one file"
+        );
+        // The pruned-by-limit metric counts files the stream visited and then
+        // dropped. Kernel emits scan-metadata in batches, and early-break drops
+        // the stream before later batches arrive, so the exact value depends on
+        // kernel batching. We only check that it is non-negative.
+        assert!(visitor.num_pruned_by_limit.is_some());
+
+        let batches: Vec<_> = collect_partitioned(plan, session.task_ctx())
+            .await?
+            .into_iter()
+            .flatten()
+            .collect();
+        let row_count: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(row_count, 1, "LIMIT 1 should return exactly one row");
+
+        Ok(())
+    }
+
+    /// LIMIT 1 + Inexact (data-column) filter: defensive gate disables file pruning even when
+    /// the caller passes `Some(N)`. DataFusion's own planner would not pass `Some(1)` here in
+    /// production, but the test exercises the local invariant.
+    #[tokio::test]
+    async fn test_limit_pushdown_inexact_filter_does_not_trim_files() -> TestResult {
+        use datafusion::prelude::{col, lit};
+
+        let id_schema = Arc::new(ArrowSchema::new(vec![ArrowField::new(
+            "id",
+            ArrowDataType::Int64,
+            true,
+        )]));
+
+        let table = create_in_memory_id_table_with_rows(vec![1]).await?;
+        let table = table
+            .write(vec![RecordBatch::try_new(
+                id_schema.clone(),
+                vec![Arc::new(Int64Array::from(vec![2]))],
+            )?])
+            .await?;
+        let table = table
+            .write(vec![RecordBatch::try_new(
+                id_schema,
+                vec![Arc::new(Int64Array::from(vec![3]))],
+            )?])
+            .await?;
+
+        let provider = DeltaScan::builder()
+            .with_log_store(table.log_store())
+            .build()
+            .await?;
+        let session = Arc::new(create_session().into_inner());
+        let state = session.state_ref().read().clone();
+
+        let filters = vec![col("id").gt(lit(0_i64))];
+        let plan = provider.scan(&state, None, &filters, Some(1)).await?;
+
+        let mut visitor = DeltaScanVisitor::default();
+        visit_execution_plan(plan.as_ref(), &mut visitor).unwrap();
+        assert_eq!(
+            visitor.num_scanned,
+            Some(3),
+            "Inexact filter should leave all three files in the scan plan"
+        );
+        assert_eq!(visitor.num_pruned_by_limit, Some(0));
+
+        Ok(())
+    }
+
+    /// LIMIT 1 with an explicit FileSelection: pinned files win, file-level pruning is bypassed.
+    #[tokio::test]
+    async fn test_limit_pushdown_file_selection_bypasses_pruning() -> TestResult {
+        let log_store = TestTables::Simple.table_builder()?.build_storage()?;
+        let snapshot = Arc::new(Snapshot::try_new(&log_store, None).await?);
+        let table_root = snapshot.scan_builder().build()?.table_root().clone();
+
+        // Pin to the first two files explicitly.
+        let selected_paths: Vec<String> = snapshot
+            .file_views(log_store.as_ref(), None)
+            .take(2)
+            .map_ok(|v| table_root.join(v.path_raw()).unwrap().to_string())
+            .try_collect()
+            .await?;
+        assert_eq!(selected_paths.len(), 2);
+        let selection = FileSelection::from_file_paths(selected_paths);
+
+        let provider = DeltaScan::builder()
+            .with_snapshot(snapshot)
+            .with_file_column(FILE_ID_COLUMN_DEFAULT)
+            .build()
+            .await?
+            .with_file_selection(selection);
+
+        let session = Arc::new(create_session().into_inner());
+        let state = session.state_ref().read().clone();
+        let plan = provider.scan(&state, None, &[], Some(1)).await?;
+
+        let mut visitor = DeltaScanVisitor::default();
+        visit_execution_plan(plan.as_ref(), &mut visitor).unwrap();
+        assert_eq!(
+            visitor.num_scanned,
+            Some(2),
+            "FileSelection should override file-level limit pruning"
+        );
+        assert_eq!(visitor.num_pruned_by_limit, Some(0));
+
+        Ok(())
+    }
+
+    /// LIMIT 1 + partition-only Exact filter on a multi-file partition: pruning trims to one
+    /// matching file. Partition predicates are classified Exact, so the safety gate allows pruning.
+    #[tokio::test]
+    async fn test_limit_pushdown_partition_only_filter_trims_files() -> TestResult {
+        use datafusion::prelude::{col, lit};
+
+        let row_schema = Arc::new(ArrowSchema::new(vec![
+            ArrowField::new("part", ArrowDataType::Utf8, true),
+            ArrowField::new("value", ArrowDataType::Int32, true),
+        ]));
+        let make_batch = |part: &str, value: i32| -> crate::DeltaResult<RecordBatch> {
+            Ok(RecordBatch::try_new(
+                row_schema.clone(),
+                vec![
+                    Arc::new(StringArray::from(vec![part])),
+                    Arc::new(Int32Array::from(vec![value])),
+                ],
+            )?)
+        };
+
+        // Two partitions × one+two files. Partition A has two files, B has one.
+        let table = crate::DeltaTable::new_in_memory()
+            .write(vec![make_batch("A", 1)?])
+            .with_partition_columns(vec!["part"])
+            .await?;
+        let table = table.write(vec![make_batch("B", 2)?]).await?;
+        let table = table.write(vec![make_batch("A", 3)?]).await?;
+
+        info!("TEST START ---------------------------------------");
+        let provider = DeltaScan::builder()
+            .with_log_store(table.log_store())
+            .build()
+            .await?;
+        let session = Arc::new(create_session().into_inner());
+        let state = session.state_ref().read().clone();
+
+        let filters = vec![col("part").eq(lit("A"))];
+        let plan = provider.scan(&state, None, &filters, Some(1)).await?;
+
+        let mut visitor = DeltaScanVisitor::default();
+        visit_execution_plan(plan.as_ref(), &mut visitor).unwrap();
+        assert_eq!(
+            visitor.num_scanned,
+            Some(1),
+            "Exact partition filter + LIMIT 1 should leave a single matching file"
+        );
+        // Pruned-by-limit count depends on kernel batch shape (see no-filter
+        // test for the rationale); we assert presence, not value.
+        assert!(visitor.num_pruned_by_limit.is_some());
+
+        let batches: Vec<_> = collect_partitioned(plan, session.task_ctx())
+            .await?
+            .into_iter()
+            .flatten()
+            .collect();
+        let row_count: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(row_count, 1);
+
         Ok(())
     }
 }

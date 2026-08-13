@@ -3,7 +3,9 @@ use std::sync::Arc;
 
 use arrow_array::RecordBatch;
 use delta_kernel::engine::arrow_data::ArrowEngineData;
-use delta_kernel::scan::{Scan as KernelScan, ScanBuilder as KernelScanBuilder, ScanMetadata};
+use delta_kernel::scan::{
+    Scan as KernelScan, ScanBuilder as KernelScanBuilder, ScanMetadata, StatsOptions,
+};
 use delta_kernel::schema::SchemaRef;
 use delta_kernel::snapshot::Snapshot as KernelSnapshot;
 use delta_kernel::{Engine, EngineData, PredicateRef, SnapshotRef, Version};
@@ -14,9 +16,13 @@ use url::Url;
 
 #[cfg(feature = "datafusion")]
 use super::MaterializedFiles;
-use super::stats_projection::{FileStatsMaterialization, StatsProjection, StatsSourcePolicy};
+use super::stats_projection::{
+    FileStatsMaterialization, RawStatsPolicy, StatsProjection, StatsSourcePolicy,
+    logicalize_column_path,
+};
 use crate::DeltaResult;
-use crate::kernel::{ReceiverStreamBuilder, scan_row_in_eval};
+use crate::kernel::arrow::engine_ext::SnapshotExt;
+use crate::kernel::{CachedScanRowEvaluator, ReceiverStreamBuilder};
 
 /// A boxed, `Send`able stream of [`ScanMetadata`] results produced while scanning a snapshot.
 pub type SendableScanMetadataStream = Pin<Box<dyn Stream<Item = DeltaResult<ScanMetadata>> + Send>>;
@@ -28,6 +34,7 @@ pub struct ScanBuilder {
     schema: Option<SchemaRef>,
     predicate: Option<PredicateRef>,
     stats_materialization: Option<FileStatsMaterialization>,
+    checkpoint_stats_json_fallback: bool,
 }
 
 impl ScanBuilder {
@@ -38,7 +45,13 @@ impl ScanBuilder {
             schema: None,
             predicate: None,
             stats_materialization: None,
+            checkpoint_stats_json_fallback: false,
         }
+    }
+
+    pub(super) fn with_checkpoint_stats_json_fallback(mut self, enabled: bool) -> Self {
+        self.checkpoint_stats_json_fallback = enabled;
+        self
     }
 
     /// Provide [`Schema`] for columns to select from the [`Snapshot`].
@@ -109,6 +122,7 @@ impl ScanBuilder {
             schema,
             predicate,
             stats_materialization,
+            checkpoint_stats_json_fallback,
         } = self;
 
         let stats_materialization = match stats_materialization {
@@ -120,7 +134,13 @@ impl ScanBuilder {
             )?),
         };
 
-        let inner = build_kernel_scan(snapshot, schema, predicate, Some(&stats_materialization))?;
+        let inner = build_kernel_scan(
+            snapshot,
+            schema,
+            predicate,
+            Some(&stats_materialization),
+            checkpoint_stats_json_fallback,
+        )?;
 
         Ok(Scan::new(Arc::new(inner), stats_materialization))
     }
@@ -140,41 +160,89 @@ fn build_kernel_scan(
     schema: Option<SchemaRef>,
     predicate: Option<PredicateRef>,
     stats_materialization: Option<&FileStatsMaterialization>,
+    checkpoint_stats_json_fallback: bool,
 ) -> DeltaResult<KernelScan> {
-    let mut builder = KernelScanBuilder::new(snapshot)
+    let mut builder = KernelScanBuilder::new(snapshot.clone())
         .with_schema_opt(schema)
         .with_predicate(predicate);
 
     if let Some(stats_materialization) = stats_materialization {
-        builder = with_kernel_stats_output(builder, stats_materialization);
+        builder = with_kernel_stats_output(
+            builder,
+            stats_materialization,
+            checkpoint_stats_json_fallback,
+            snapshot.as_ref(),
+        )?;
     }
 
     Ok(builder.build()?)
 }
 
+fn kernel_stats_options(
+    materialization: &FileStatsMaterialization,
+    checkpoint_stats_json_fallback: bool,
+) -> StatsOptions {
+    match (
+        materialization.stats_source_policy(),
+        materialization.raw_stats_policy(),
+        materialization.stats_projection(),
+    ) {
+        (StatsSourcePolicy::None, _, _) | (_, _, StatsProjection::None) => StatsOptions::none(),
+        (StatsSourcePolicy::ParsedWithJsonFallback, RawStatsPolicy::Preserve, _) => {
+            StatsOptions::all_struct()
+                .with_checkpoint_stats_json_fallback(checkpoint_stats_json_fallback)
+        }
+        (
+            StatsSourcePolicy::ParsedWithJsonFallback,
+            RawStatsPolicy::Omit,
+            StatsProjection::Full,
+        ) => StatsOptions::all_struct()
+            .with_checkpoint_stats_json_fallback(checkpoint_stats_json_fallback),
+        (
+            StatsSourcePolicy::ParsedWithJsonFallback,
+            RawStatsPolicy::Omit,
+            StatsProjection::PredicateColumns(columns),
+        ) => StatsOptions::struct_columns(columns.iter().cloned().collect())
+            .with_checkpoint_stats_json_fallback(checkpoint_stats_json_fallback),
+        (
+            StatsSourcePolicy::ParsedWithJsonFallback,
+            RawStatsPolicy::Omit,
+            StatsProjection::NumRecordsOnly,
+        ) => {
+            // Kernel 0.30 treats an empty struct projection as no statistics, including row counts.
+            StatsOptions::json_only()
+                .with_checkpoint_stats_json_fallback(checkpoint_stats_json_fallback)
+        }
+    }
+}
+
 fn with_kernel_stats_output(
     builder: KernelScanBuilder,
     materialization: &FileStatsMaterialization,
-) -> KernelScanBuilder {
-    let stats_opts = match materialization.stats_source_policy() {
-        StatsSourcePolicy::None => delta_kernel::scan::StatsOptions::none(),
-        StatsSourcePolicy::ParsedWithJsonFallback => match materialization.stats_projection() {
-            StatsProjection::None => delta_kernel::scan::StatsOptions::json_only(),
-            StatsProjection::Full | StatsProjection::PredicateColumns(_) => {
-                // Cached replay requires JSON stats in Kernel's base scan schema.
-                if materialization.preserves_raw_stats() {
-                    delta_kernel::scan::StatsOptions::all()
-                } else {
-                    // TODO: Pass selected columns to `StatsOptions::struct_columns`.
-                    delta_kernel::scan::StatsOptions::all_struct()
-                }
-            }
-            StatsProjection::NumRecordsOnly => delta_kernel::scan::StatsOptions::json_only(),
-        },
+    checkpoint_stats_json_fallback: bool,
+    snapshot: &KernelSnapshot,
+) -> DeltaResult<KernelScanBuilder> {
+    let options = if let (StatsProjection::PredicateColumns(columns), RawStatsPolicy::Omit) = (
+        materialization.stats_projection(),
+        materialization.raw_stats_policy(),
+    ) {
+        let schema = snapshot.schema();
+        let mode = snapshot.table_configuration().column_mapping_mode();
+        let columns = columns
+            .iter()
+            .map(|column| logicalize_column_path(schema.as_ref(), column, mode))
+            .collect::<DeltaResult<Vec<_>>>()?;
+        StatsOptions::struct_columns(columns)
+            .with_checkpoint_stats_json_fallback(checkpoint_stats_json_fallback)
+    } else {
+        kernel_stats_options(materialization, checkpoint_stats_json_fallback)
     };
-
-    builder.with_stats(stats_opts)
+    Ok(builder.with_stats(options))
 }
+
+#[cfg(test)]
+#[path = "scan/stats_options_tests.rs"]
+mod stats_options_tests;
 
 #[cfg(test)]
 mod tests {
@@ -207,6 +275,13 @@ mod tests {
             .with_partition_columns(["part"])
             .await?;
         super::super::Snapshot::try_new(table.log_store().as_ref(), None).await
+    }
+
+    fn assert_stats_options_eq(actual: StatsOptions, expected: StatsOptions) {
+        assert_eq!(
+            serde_json::to_value(actual).expect("actual StatsOptions should serialize"),
+            serde_json::to_value(expected).expect("expected StatsOptions should serialize")
+        );
     }
 
     #[tokio::test]
@@ -276,6 +351,16 @@ mod tests {
         assert!(scan.stats_materialization().preserves_raw_stats());
 
         Ok(())
+    }
+
+    #[test]
+    fn scan_builder_compatibility_materialization_maps_to_all_struct_stats() {
+        let materialization = FileStatsMaterialization::compatibility(StatsProjection::full());
+
+        assert_stats_options_eq(
+            kernel_stats_options(&materialization, false),
+            StatsOptions::all_struct().with_checkpoint_stats_json_fallback(false),
+        );
     }
 
     #[tokio::test]
@@ -371,6 +456,8 @@ mod tests {
             scan.scan_metadata_from(
                 log_store.engine(None),
                 snapshot.version(),
+                None,
+                true,
                 Box::new(std::iter::once(malformed)),
                 None,
             )
@@ -498,20 +585,26 @@ impl Scan {
         engine: Arc<dyn Engine>,
         materialized_files: Option<&Arc<MaterializedFiles>>,
     ) -> SendableScanMetadataStream {
-        match materialized_files.and_then(|materialized_files| materialized_files.full_table_seed())
-        {
-            Some(materialized_seed) => {
-                let (existing_version, existing_data, existing_predicate) =
-                    materialized_seed.into_parts();
-                self.scan_metadata_from(
-                    engine,
-                    existing_version,
-                    Box::new(existing_data),
-                    existing_predicate,
-                )
-            }
-            None => self.scan_metadata(engine),
-        }
+        let Some(materialized_seed) =
+            materialized_files.and_then(|materialized_files| materialized_files.full_table_seed())
+        else {
+            return self.scan_metadata(engine);
+        };
+        let (
+            existing_version,
+            available_stats_schema,
+            raw_stats_available,
+            existing_data,
+            existing_predicate,
+        ) = materialized_seed.into_parts();
+        self.scan_metadata_from(
+            engine,
+            existing_version,
+            available_stats_schema,
+            raw_stats_available,
+            Box::new(existing_data),
+            existing_predicate,
+        )
     }
 
     /// Stream [`ScanMetadata`] incrementally starting from a previously observed state.
@@ -523,30 +616,43 @@ impl Scan {
         &self,
         engine: Arc<dyn Engine>,
         existing_version: Version,
+        available_stats_schema: Option<SchemaRef>,
+        raw_stats_available: bool,
         existing_data: Box<T>,
         existing_predicate: Option<PredicateRef>,
     ) -> SendableScanMetadataStream {
         let inner = self.inner.clone();
-        let snapshot = self.inner.snapshot().clone();
-
-        // process our stored / cached data to conform to the expected input for log replay
-        let evaluator = match scan_row_in_eval(&snapshot) {
-            Ok(scan_row_in_eval) => scan_row_in_eval,
+        let effective_replay_stats_schema = inner.effective_replay_stats_schema().cloned();
+        let partition_schema = match inner.snapshot().partitions_schema() {
+            Ok(partition_schema) => partition_schema,
             Err(err) => return Box::pin(once(ready(Err(err)))),
         };
+        let evaluator = match CachedScanRowEvaluator::try_new(
+            available_stats_schema.as_ref(),
+            raw_stats_available,
+            effective_replay_stats_schema,
+            partition_schema.as_ref(),
+        ) {
+            Ok(evaluator) => evaluator,
+            Err(err) => return Box::pin(once(ready(Err(err)))),
+        };
+        let stats_parsed_schema = evaluator.stats_parsed_schema();
+        let scan_row_iter = existing_data.map(move |batch| {
+            evaluator
+                .evaluate(batch)
+                .map(|batch| Box::new(ArrowEngineData::new(batch)) as Box<dyn EngineData>)
+                .map_err(delta_kernel::KernelError::generic_err)
+        });
+
         // TODO: which capacity to choose?
         let mut builder = ReceiverStreamBuilder::<ScanMetadata>::new(100);
         let tx = builder.tx();
         let scan_inner = move || {
-            let scan_row_data = existing_data
-                .map(|batch| Box::new(ArrowEngineData::new(batch)) as Box<dyn EngineData>)
-                .map(move |batch| evaluator.evaluate(batch.as_ref()));
-
             for res in inner.scan_metadata_from(
                 engine.as_ref(),
                 existing_version,
-                None,
-                scan_row_data,
+                stats_parsed_schema,
+                Box::new(scan_row_iter),
                 existing_predicate,
             )? {
                 if tx.blocking_send(Ok(res?)).is_err() {
