@@ -80,7 +80,7 @@ pub use self::exec::DeltaScanExec;
 use self::exec::DvExecutionState;
 pub(crate) use self::exec_meta::DeltaScanMetaExec;
 pub(crate) use self::plan::{KernelScanPlan, ProjectedScanContract, supports_filters_pushdown};
-use self::replay::{ScanFileContext, ScanFileStream};
+pub(crate) use self::replay::{ScanFileContext, ScanFileStream};
 pub(crate) use self::runtime_filter::RuntimeFileFilter;
 use self::runtime_filter::RuntimeScanFilePruner;
 use super::{FileSelection, ResolvedFileSelection};
@@ -94,6 +94,7 @@ use crate::{
     },
     kernel::LogicalFileView,
 };
+use crate::delta_datafusion::schema_null::rewrite_schema_with_nullable_fields;
 
 mod codec;
 mod exec;
@@ -1118,9 +1119,12 @@ fn finalize_transformed_batch(
             // The batch adapter targets a nullability-relaxed schema (see
             // `expr_adapter`). Restamp to the strict logical schema; this
             // validates actual data nulls rather than declared nullability.
+            let output_schema = rewrite_schema_with_nullable_fields(
+                scan_plan.contract.result_schema.clone()
+            );
             crate::kernel::cast_record_batch(
                 &adapted,
-                scan_plan.contract.result_schema.clone(),
+                output_schema,
                 false,
                 false,
             )
