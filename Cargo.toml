@@ -16,14 +16,14 @@ documentation = "https://docs.rs/deltalake"
 repository = "https://github.com/delta-io/delta.rs"
 
 [workspace.dependencies]
-#delta_kernel = { package = "buoyant_kernel", path = "../delta-kernel-rs/kernel", features = [
-delta_kernel = { package = "buoyant_kernel", git = "https://github.com/hstack/delta-kernel-rs", branch = "buoyant-v0.25.1", features = [
+# delta_kernel = { package = "buoyant_kernel", path = "../delta-kernel-rs/kernel", features = [
+delta_kernel = { package = "buoyant_kernel", git = "https://github.com/hstack/delta-kernel-rs", branch = "buoyant-v0.25.1-stats", features = [
 #delta_kernel = { package = "buoyant_kernel", version = "0.25.0,<0.25.100", features = [
     "arrow-58",
     "internal-api",
 ] }
-#delta_kernel_default_engine = {  package = "buoyant_kernel_engine",  path = "../delta-kernel-rs/default-engine", features = ["arrow-58", "rustls"], default-features = false }
-delta_kernel_default_engine = {  package = "buoyant_kernel_engine",  git = "https://github.com/hstack/delta-kernel-rs", branch = "buoyant-v0.25.1", features = ["arrow-58", "rustls"], default-features = false }
+# delta_kernel_default_engine = {  package = "buoyant_kernel_engine",  path = "../delta-kernel-rs/default-engine", features = ["arrow-58", "rustls"], default-features = false }
+delta_kernel_default_engine = {  package = "buoyant_kernel_engine",  git = "https://github.com/hstack/delta-kernel-rs", branch = "buoyant-v0.25.1-stats", features = ["arrow-58", "rustls"], default-features = false }
 #delta_kernel_default_engine = {  package = "buoyant_kernel_engine",  version = "0.25.0,<0.25.100", features = ["arrow-58", "rustls"], default-features = false }
 
 
@@ -198,5 +198,40 @@ datafusion-session = { git = 'https://github.com/hstack/datafusion.git', branch 
 datafusion-spark = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-54' }
 datafusion-sql = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-54' }
 datafusion-substrait = { git = 'https://github.com/hstack/datafusion.git', branch = 'main-54' }
-buoyant_kernel = { git = 'https://github.com/hstack/delta-kernel-rs.git', branch = 'buoyant-v0.25.1' }
-#buoyant_kernel = { path = "../delta-kernel-rs-main-024/kernel" }
+#datafusion = { path = "../datafusion/datafusion/core" }
+#datafusion-catalog = { path = "../datafusion/datafusion/catalog" }
+#datafusion-catalog-listing = { path = "../datafusion/datafusion/catalog-listing" }
+#datafusion-common = { path = "../datafusion/datafusion/common" }
+#datafusion-common-runtime = { path = "../datafusion/datafusion/common-runtime" }
+#datafusion-datasource = { path = "../datafusion/datafusion/datasource" }
+#datafusion-datasource-arrow = { path = "../datafusion/datafusion/datasource-arrow" }
+#datafusion-datasource-avro = { path = "../datafusion/datafusion/datasource-avro" }
+#datafusion-datasource-csv = { path = "../datafusion/datafusion/datasource-csv" }
+#datafusion-datasource-json = { path = "../datafusion/datafusion/datasource-json" }
+#datafusion-datasource-parquet = { path = "../datafusion/datafusion/datasource-parquet" }
+#datafusion-execution = { path = "../datafusion/datafusion/execution" }
+#datafusion-expr = { path = "../datafusion/datafusion/expr" }
+#datafusion-expr-common = { path = "../datafusion/datafusion/expr-common" }
+#datafusion-ffi = { path = "../datafusion/datafusion/ffi" }
+#datafusion-functions = { path = "../datafusion/datafusion/functions" }
+#datafusion-functions-aggregate = { path = "../datafusion/datafusion/functions-aggregate" }
+#datafusion-functions-aggregate-common = { path = "../datafusion/datafusion/functions-aggregate-common" }
+#datafusion-functions-nested = { path = "../datafusion/datafusion/functions-nested" }
+#datafusion-functions-table = { path = "../datafusion/datafusion/functions-table" }
+#datafusion-functions-window = { path = "../datafusion/datafusion/functions-window" }
+#datafusion-functions-window-common = { path = "../datafusion/datafusion/functions-window-common" }
+#datafusion-optimizer = { path = "../datafusion/datafusion/optimizer" }
+#datafusion-physical-expr = { path = "../datafusion/datafusion/physical-expr" }
+#datafusion-physical-expr-adapter = { path = "../datafusion/datafusion/physical-expr-adapter" }
+#datafusion-physical-expr-common = { path = "../datafusion/datafusion/physical-expr-common" }
+#datafusion-physical-optimizer = { path = "../datafusion/datafusion/physical-optimizer" }
+#datafusion-physical-plan = { path = "../datafusion/datafusion/physical-plan" }
+#datafusion-proto = { path = "../datafusion/datafusion/proto" }
+#datafusion-proto-common = { path = "../datafusion/datafusion/proto-common" }
+#datafusion-pruning = { path = "../datafusion/datafusion/pruning" }
+#datafusion-session = { path = "../datafusion/datafusion/session" }
+#datafusion-spark = { path = "../datafusion/datafusion/spark" }
+#datafusion-sql = { path = "../datafusion/datafusion/sql" }
+
+#buoyant_kernel = { git = 'https://github.com/hstack/delta-kernel-rs.git', branch = 'buoyant-v0.25.1-stats' }
+#buoyant_kernel = { path = "../delta-kernel-rs/kernel" }
