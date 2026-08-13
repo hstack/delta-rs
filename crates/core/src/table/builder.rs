@@ -74,6 +74,12 @@ pub struct DeltaTableConfig {
     #[serde(default)]
     pub skip_stats: bool,
 
+    /// Allow parsed file statistics to fall back to JSON stats stored in checkpoints.
+    /// This defaults to `false`.
+    #[serde(default)]
+    #[delta(skip)]
+    pub checkpoint_stats_json_fallback: bool,
+
     #[serde(skip_serializing, skip_deserializing)]
     #[delta(skip)]
     /// When a runtime handler is provided, all IO tasks are spawn in that handle
@@ -96,6 +102,7 @@ impl Default for DeltaTableConfig {
             log_buffer_size: num_cpus::get() * 4,
             log_batch_size: 1024,
             skip_stats: false,
+            checkpoint_stats_json_fallback: false,
             io_runtime: None,
             log_size_limiter: None,
             engine: None,
@@ -109,6 +116,7 @@ impl PartialEq for DeltaTableConfig {
             && self.log_buffer_size == other.log_buffer_size
             && self.log_batch_size == other.log_batch_size
             && self.skip_stats == other.skip_stats
+            && self.checkpoint_stats_json_fallback == other.checkpoint_stats_json_fallback
             && self.log_size_limiter == other.log_size_limiter
     }
 }
@@ -169,6 +177,12 @@ impl DeltaTableBuilder {
     /// for the impact on predicated queries.
     pub fn with_skip_stats(mut self, skip_stats: bool) -> Self {
         self.table_config.skip_stats = skip_stats;
+        self
+    }
+
+    /// Sets whether checkpoint stats parsing may fall back to JSON stats.
+    pub fn with_checkpoint_stats_json_fallback(mut self, enabled: bool) -> Self {
+        self.table_config.checkpoint_stats_json_fallback = enabled;
         self
     }
 
