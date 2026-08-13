@@ -162,6 +162,9 @@ impl MaterializedFilesWire {
         let materialized_files = MaterializedFiles {
             identity,
             policy,
+            stats_parsed_schema: owning_snapshot
+                .materialized_stats_parsed_schema()
+                .map_err(|err| err.to_string())?,
             scope,
             existing_predicate: None,
             batches: deserialize_batches(self.batches)?.into(),
@@ -189,10 +192,10 @@ fn materialized_files_from_legacy_eager_payload(
         return Ok(None);
     }
 
-    Ok(Some(Arc::new(MaterializedFiles::full(
-        snapshot,
-        deserialize_batches(legacy_payload)?,
-    ))))
+    Ok(Some(Arc::new(
+        MaterializedFiles::full(snapshot, deserialize_batches(legacy_payload)?)
+            .map_err(|err| err.to_string())?,
+    )))
 }
 
 fn serialize_batches(batches: &[arrow_array::RecordBatch]) -> Result<Vec<u8>, String> {

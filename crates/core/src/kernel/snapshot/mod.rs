@@ -47,7 +47,7 @@ use crate::kernel::arrow::extract::{self as ex, ProvidesColumnByName};
 
 use super::{Action, CommitInfo, Metadata, Protocol};
 use crate::checkpoints::parse_last_checkpoint_hint;
-use crate::kernel::arrow::engine_ext::{ExpressionEvaluatorExt, rb_from_scan_meta};
+use crate::kernel::arrow::engine_ext::{ExpressionEvaluatorExt, SnapshotExt, rb_from_scan_meta};
 use crate::kernel::{ARROW_HANDLER, StructType, spawn_blocking_with_span};
 use crate::logstore::{LogStore, LogStoreExt};
 use crate::{DeltaResult, DeltaTableConfig, DeltaTableError, PartitionFilter, to_kernel_predicate};
@@ -292,11 +292,13 @@ impl Snapshot {
     /// Create a [`ScanBuilder`] borrowing this snapshot to configure a read of the table.
     pub fn scan_builder(&self) -> ScanBuilder {
         ScanBuilder::new(self.inner.clone())
+            .with_checkpoint_stats_json_fallback(self.config.checkpoint_stats_json_fallback)
     }
 
     /// Consume this snapshot and create a [`ScanBuilder`] that owns the underlying state.
     pub fn into_scan_builder(self) -> ScanBuilder {
         ScanBuilder::new(self.inner)
+            .with_checkpoint_stats_json_fallback(self.config.checkpoint_stats_json_fallback)
     }
 
     /// Update the snapshot to the given version
@@ -351,8 +353,12 @@ impl Snapshot {
         } else {
             match self.materialized_files() {
                 Some(materialized_files) => {
+                    // Cached partitionValues_parsed uses the source snapshot's layout.
+                    let materialized_seed = (self.inner.partitions_schema()?
+                        == snapshot.inner.partitions_schema()?)
+                    .then_some(materialized_files);
                     snapshot
-                        .materialize_files_with_engine(engine, Some(materialized_files))
+                        .materialize_files_with_engine(engine, materialized_seed)
                         .await
                 }
                 None => Ok(snapshot),
@@ -468,6 +474,13 @@ impl Snapshot {
             MaterializedFilesPolicy::FullTableWithoutStats
         } else {
             MaterializedFilesPolicy::FullTablePreserveRaw
+        }
+    }
+
+    fn materialized_stats_parsed_schema(&self) -> DeltaResult<Option<KernelSchemaRef>> {
+        match self.materialized_files_policy() {
+            MaterializedFilesPolicy::FullTablePreserveRaw => Ok(Some(self.inner.stats_schema()?)),
+            MaterializedFilesPolicy::FullTableWithoutStats => Ok(None),
         }
     }
 
@@ -643,12 +656,19 @@ impl Snapshot {
             .and_then(|materialized_files| materialized_files.full_table_seed())
         {
             Some(materialized_seed) => {
-                let (existing_version, existing_data, existing_predicate) =
-                    materialized_seed.into_parts();
+                let (
+                    existing_version,
+                    available_stats_schema,
+                    raw_stats_available,
+                    existing_data,
+                    existing_predicate,
+                ) = materialized_seed.into_parts();
                 self.files_from(
                     engine,
                     predicate,
                     existing_version,
+                    available_stats_schema,
+                    raw_stats_available,
                     Box::new(existing_data),
                     existing_predicate,
                 )
@@ -802,12 +822,19 @@ impl Snapshot {
             .and_then(|materialized_files| materialized_files.full_table_seed())
         {
             Some(materialized_seed) => {
-                let (existing_version, existing_data, existing_predicate) =
-                    materialized_seed.into_parts();
+                let (
+                    existing_version,
+                    available_stats_schema,
+                    raw_stats_available,
+                    existing_data,
+                    existing_predicate,
+                ) = materialized_seed.into_parts();
                 self.files_from_materialized_with_options(
                     log_store.engine(None),
                     predicate,
                     existing_version,
+                    available_stats_schema,
+                    raw_stats_available,
                     Box::new(existing_data),
                     existing_predicate,
                     FileMaterializationOptions {
@@ -830,6 +857,8 @@ impl Snapshot {
         engine: Arc<dyn Engine>,
         predicate: Option<PredicateRef>,
         existing_version: Version,
+        available_stats_schema: Option<KernelSchemaRef>,
+        raw_stats_available: bool,
         existing_data: Box<T>,
         existing_predicate: Option<PredicateRef>,
     ) -> SendableRBStream {
@@ -837,6 +866,8 @@ impl Snapshot {
             engine,
             predicate,
             existing_version,
+            available_stats_schema,
+            raw_stats_available,
             existing_data,
             existing_predicate,
             FileStatsMode::PreserveRaw,
@@ -848,6 +879,8 @@ impl Snapshot {
         engine: Arc<dyn Engine>,
         predicate: Option<PredicateRef>,
         existing_version: Version,
+        available_stats_schema: Option<KernelSchemaRef>,
+        raw_stats_available: bool,
         existing_data: Box<T>,
         existing_predicate: Option<PredicateRef>,
     ) -> SendableRBStream {
@@ -855,6 +888,8 @@ impl Snapshot {
             engine,
             predicate,
             existing_version,
+            available_stats_schema,
+            raw_stats_available,
             existing_data,
             existing_predicate,
             FileStatsMode::FullPreserveRaw,
@@ -866,6 +901,8 @@ impl Snapshot {
         engine: Arc<dyn Engine>,
         predicate: Option<PredicateRef>,
         existing_version: Version,
+        available_stats_schema: Option<KernelSchemaRef>,
+        raw_stats_available: bool,
         existing_data: Box<T>,
         existing_predicate: Option<PredicateRef>,
         stats_mode: FileStatsMode,
@@ -874,6 +911,8 @@ impl Snapshot {
             engine,
             predicate,
             existing_version,
+            available_stats_schema,
+            raw_stats_available,
             existing_data,
             existing_predicate,
             FileMaterializationOptions {
@@ -888,6 +927,8 @@ impl Snapshot {
         engine: Arc<dyn Engine>,
         predicate: Option<PredicateRef>,
         existing_version: Version,
+        available_stats_schema: Option<KernelSchemaRef>,
+        raw_stats_available: bool,
         existing_data: Box<T>,
         existing_predicate: Option<PredicateRef>,
         options: FileMaterializationOptions,
@@ -900,7 +941,14 @@ impl Snapshot {
         let stats_materialization = scan.stats_materialization().clone();
 
         let stream = scan
-            .scan_metadata_from(engine, existing_version, existing_data, existing_predicate)
+            .scan_metadata_from(
+                engine,
+                existing_version,
+                available_stats_schema,
+                raw_stats_available,
+                existing_data,
+                existing_predicate,
+            )
             .map(|d| Ok(rb_from_scan_meta(d?)?));
 
         match ScanRowOutStream::try_new_with_materialization(
@@ -959,14 +1007,23 @@ impl Snapshot {
             return Ok(self);
         }
 
+        // TODO: Compatible parsed checkpoints avoid physical `stats` JSON I/O, but FullTablePreserveRaw still retains both
+        // synthesized `stats` JSON and full `stats_parsed`; removing duplication requires a narrower or lazy cache representation.
         let batches = match materialized_seed.and_then(|seed| seed.full_table_seed()) {
             Some(materialized_seed) => {
-                let (existing_version, existing_data, existing_predicate) =
-                    materialized_seed.into_parts();
+                let (
+                    existing_version,
+                    available_stats_schema,
+                    raw_stats_available,
+                    existing_data,
+                    existing_predicate,
+                ) = materialized_seed.into_parts();
                 self.files_from_preserving_raw(
                     engine,
                     None,
                     existing_version,
+                    available_stats_schema,
+                    raw_stats_available,
                     Box::new(existing_data),
                     existing_predicate,
                 )
@@ -979,7 +1036,7 @@ impl Snapshot {
                     .await?
             }
         };
-        let materialized_files = Arc::new(MaterializedFiles::full(self.as_ref(), batches));
+        let materialized_files = Arc::new(MaterializedFiles::full(self.as_ref(), batches)?);
         Ok(Arc::new(
             self.with_materialized_files(Some(materialized_files)),
         ))
@@ -1194,6 +1251,7 @@ pub(crate) enum MaterializedFilesScope {
 pub(crate) struct MaterializedFiles {
     identity: SnapshotIdentity,
     policy: MaterializedFilesPolicy,
+    stats_parsed_schema: Option<KernelSchemaRef>,
     pub(crate) scope: MaterializedFilesScope,
     pub(crate) existing_predicate: Option<PredicateRef>,
     pub(crate) batches: Arc<[RecordBatch]>,
@@ -1202,14 +1260,26 @@ pub(crate) struct MaterializedFiles {
 #[derive(Debug, Clone)]
 struct MaterializedFilesSeed {
     version: Version,
+    stats_parsed_schema: Option<KernelSchemaRef>,
+    raw_stats_available: bool,
     existing_predicate: Option<PredicateRef>,
     batches: Arc<[RecordBatch]>,
 }
 
 impl MaterializedFilesSeed {
-    fn into_parts(self) -> (Version, SharedRecordBatchIter, Option<PredicateRef>) {
+    fn into_parts(
+        self,
+    ) -> (
+        Version,
+        Option<KernelSchemaRef>,
+        bool,
+        SharedRecordBatchIter,
+        Option<PredicateRef>,
+    ) {
         (
             self.version,
+            self.stats_parsed_schema,
+            self.raw_stats_available,
             SharedRecordBatchIter::new(self.batches),
             self.existing_predicate,
         )
@@ -1251,15 +1321,16 @@ impl Iterator for SharedRecordBatchIter {
 }
 
 impl MaterializedFiles {
-    fn full(snapshot: &Snapshot, batches: Vec<RecordBatch>) -> Self {
+    fn full(snapshot: &Snapshot, batches: Vec<RecordBatch>) -> DeltaResult<Self> {
         let identity = snapshot.identity();
-        Self {
+        Ok(Self {
             identity,
             policy: snapshot.materialized_files_policy(),
+            stats_parsed_schema: snapshot.materialized_stats_parsed_schema()?,
             scope: MaterializedFilesScope::FullTable,
             existing_predicate: None,
             batches: batches.into(),
-        }
+        })
     }
 
     fn is_cache_for(&self, snapshot: &Snapshot) -> bool {
@@ -1270,6 +1341,8 @@ impl MaterializedFiles {
         match self.scope {
             MaterializedFilesScope::FullTable => Some(MaterializedFilesSeed {
                 version: self.identity.version,
+                stats_parsed_schema: self.stats_parsed_schema.clone(),
+                raw_stats_available: matches!(self.policy, MaterializedFilesPolicy::FullTablePreserveRaw),
                 existing_predicate: self.existing_predicate.clone(),
                 batches: self.batches.clone(),
             }),
@@ -2158,7 +2231,7 @@ mod tests {
         let target = Snapshot::try_new(log_store.as_ref(), Default::default(), Some(12)).await?;
         let expected = active_add_paths(&target, log_store.as_ref()).await?;
 
-        let mut mismatched_cache = MaterializedFiles::full(&target, vec![]);
+        let mut mismatched_cache = MaterializedFiles::full(&target, vec![])?;
         mismatched_cache.identity.table_root = Url::parse("memory:///other/")?;
         let cached = Arc::new(target.with_materialized_files(Some(Arc::new(mismatched_cache))));
 
@@ -2374,6 +2447,7 @@ mod tests {
 
         let value = serde_json::to_value(snapshot.as_ref())?;
         assert_eq!(value[10]["policy"], json!("FullTablePreserveRaw"));
+        assert!(value[10].get("stats_parsed_schema").is_none());
 
         let bytes = serde_json::to_vec(snapshot.as_ref())?;
         let actual: Snapshot = serde_json::from_slice(&bytes)?;
@@ -2390,6 +2464,10 @@ mod tests {
         assert_eq!(
             materialized_files.policy,
             MaterializedFilesPolicy::FullTablePreserveRaw
+        );
+        assert_eq!(
+            materialized_files.stats_parsed_schema,
+            Some(actual.inner.stats_schema()?)
         );
 
         Ok(())
@@ -2440,6 +2518,10 @@ mod tests {
             MaterializedFilesPolicy::FullTablePreserveRaw
         );
         assert_eq!(materialized_files.scope, MaterializedFilesScope::FullTable);
+        assert_eq!(
+            materialized_files.stats_parsed_schema,
+            Some(actual.snapshot().inner.stats_schema()?)
+        );
         assert_eq!(actual.try_log_data()?.num_files(), 1);
         assert_eq!(
             actual
@@ -2504,6 +2586,7 @@ mod tests {
             materialized_files.policy,
             MaterializedFilesPolicy::FullTableWithoutStats
         );
+        assert!(materialized_files.stats_parsed_schema.is_none());
         assert!(
             actual
                 .try_log_data()?
@@ -3154,11 +3237,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cached_seed_carries_exact_schema_for_empty_cache() -> TestResult {
+        let log_store = TestTables::Simple.table_builder()?.build_storage()?;
+        let snapshot = Snapshot::try_new(&log_store, Default::default(), None).await?;
+        let expected_schema = snapshot.inner.stats_schema()?;
+        let materialized_files = MaterializedFiles::full(&snapshot, vec![])?;
+        assert_eq!(
+            materialized_files.stats_parsed_schema,
+            Some(expected_schema.clone())
+        );
+        let seed = materialized_files
+            .full_table_seed()
+            .expect("full-table cache must produce a seed");
+        assert_eq!(seed.stats_parsed_schema, Some(expected_schema));
+        assert!(seed.raw_stats_available);
+
+        let config = DeltaTableConfig {
+            skip_stats: true,
+            ..Default::default()
+        };
+        let snapshot = Snapshot::try_new(&log_store, config, None).await?;
+        let materialized_files = MaterializedFiles::full(&snapshot, vec![])?;
+        assert!(materialized_files.stats_parsed_schema.is_none());
+        let seed = materialized_files
+            .full_table_seed()
+            .expect("full-table cache must produce a seed");
+        assert!(seed.stats_parsed_schema.is_none());
+        assert!(!seed.raw_stats_available);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_materialized_files_full_table_seed_shares_batches() -> TestResult {
         let log_store = TestTables::Simple.table_builder()?.build_storage()?;
         let snapshot = Snapshot::try_new(&log_store, Default::default(), None).await?;
         let batch = RecordBatch::new_empty(Arc::new(arrow_schema::Schema::empty()));
-        let materialized_files = MaterializedFiles::full(&snapshot, vec![batch]);
+        let materialized_files = MaterializedFiles::full(&snapshot, vec![batch])?;
 
         let seed = materialized_files
             .full_table_seed()
