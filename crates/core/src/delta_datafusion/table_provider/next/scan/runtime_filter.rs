@@ -27,7 +27,7 @@ use super::plan::process_filters;
 use super::replay::ScanFileContext;
 use crate::DeltaResult;
 use crate::delta_datafusion::DeltaScanConfig;
-use crate::kernel::{FileStatsMaterialization, Snapshot, StatsProjection};
+use crate::kernel::Snapshot;
 
 /// Predicates that skip whole files of planned Delta scans, set once during execution.
 ///
@@ -168,12 +168,7 @@ impl RuntimeScanFilePruner {
             return Ok(vec![true; self.file_indexes.len()]);
         };
         // Only the file paths are read
-        let scan = snapshot
-            .scan_builder()
-            .with_predicate(predicate)
-            // we don't parse stats beyond what file skipping needs
-            .with_stats_materialization(FileStatsMaterialization::query(StatsProjection::none()))
-            .build()?;
+        let scan = snapshot.scan_builder().with_predicate(predicate).build()?;
         let stream =
             scan.scan_metadata_seeded(Arc::clone(&self.engine), snapshot.materialized_files());
 

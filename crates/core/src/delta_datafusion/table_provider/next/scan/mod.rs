@@ -27,6 +27,7 @@ use arrow_array::{
 use arrow_cast::{CastOptions, cast_with_options};
 use arrow_schema::{DataType, Field, FieldRef, Schema, SchemaBuilder, SchemaRef};
 use dashmap::DashMap;
+use datafusion::logical_expr::TableProviderFilterPushDown;
 use datafusion::{
     catalog::Session,
     common::{
@@ -84,6 +85,8 @@ pub(crate) use self::replay::{ScanFileContext, ScanFileStream};
 pub(crate) use self::runtime_filter::RuntimeFileFilter;
 use self::runtime_filter::RuntimeScanFilePruner;
 use super::{FileSelection, ResolvedFileSelection};
+use crate::delta_datafusion::schema_null::rewrite_schema_with_nullable_fields;
+use crate::delta_datafusion::table_provider::next::scan::limit::LimitPruneState;
 use crate::{
     DeltaTableError,
     delta_datafusion::{
@@ -94,7 +97,6 @@ use crate::{
     },
     kernel::LogicalFileView,
 };
-use crate::delta_datafusion::schema_null::rewrite_schema_with_nullable_fields;
 
 mod codec;
 mod exec;
@@ -144,12 +146,30 @@ pub(super) async fn execution_plan(
         )));
     }
 
+    // File-level limit pruning is safe iff:
+    // - the caller asked for a row cap,
+    // - no explicit FileSelection is in play (explicit pins win), and
+    // - every filter is marked Exact (DataFusion's own contract already forbids
+    //   passing `Some(N)` here when an Inexact filter would survive above the
+    //   scan; this check is a defensive duplicate so the invariant is local).
+    let prune_by_limit: Option<usize> = limit.filter(|_| {
+        file_selection.is_none() && runtime_filter.is_none() && {
+            let filter_refs: Vec<&Expr> = scan_plan.filters.iter().collect();
+            let pushdown =
+                supports_filters_pushdown(&filter_refs, scan_plan.table_configuration(), config);
+            pushdown
+                .iter()
+                .all(|p| matches!(p, TableProviderFilterPushDown::Exact))
+        }
+    });
+
     let replayed = replay_files(
         Arc::clone(&engine),
         &scan_plan,
         config.clone(),
         stream,
         file_selection,
+        prune_by_limit,
     )
     .await?;
 
@@ -364,6 +384,7 @@ async fn replay_files(
     scan_config: DeltaScanConfig,
     stream: ScanMetadataStream,
     file_selection: Option<&ResolvedFileSelection>,
+    prune_by_limit: Option<usize>,
 ) -> Result<ReplayedScanFiles> {
     let mut stream = ScanFileStream::new(
         engine,
@@ -372,10 +393,34 @@ async fn replay_files(
         file_selection.map(|selection| &selection.active_file_ids),
         stream,
     );
-    let mut files = Vec::new();
-    while let Some(file) = stream.try_next().await? {
-        files.extend(file);
-    }
+    // let mut files = Vec::new();
+    // while let Some(file) = stream.try_next().await? {
+    //     files.extend(file);
+    // }
+
+    let mut files = if let Some(cap) = prune_by_limit {
+        let mut state = LimitPruneState::new(cap);
+        'outer: while let Some(batch_files) = stream.try_next().await? {
+            for file in batch_files {
+                if state.accept(file) {
+                    break 'outer;
+                }
+            }
+        }
+        // The second tuple element (unknown-pool drops) is a subset of
+        // `count_files_pruned_by_limit`, which we compute below from the
+        // stream's total visit count minus the final file set. That formula
+        // also captures files in the partially-consumed final batch that we
+        // dropped on early-break without going through the unknown pool.
+        let (kept, _) = state.finalize();
+        kept
+    } else {
+        let mut files = Vec::new();
+        while let Some(batch_files) = stream.try_next().await? {
+            files.extend(batch_files);
+        }
+        files
+    };
 
     let mut public_file_ids = PublicFileIdMap::default();
     if scan_plan.contract.retain_file_id {
@@ -397,9 +442,14 @@ async fn replay_files(
         })
         .collect();
 
+    let retained_file_urls: HashSet<_> = files.iter().map(|file| &file.meta.location).collect();
     let dv_stream = stream.dv_stream.build();
     let dvs_by_url: HashMap<_, _> = dv_stream
         .try_filter_map(|(url, dv, num_records, cardinality)| {
+            // DV loads start for the whole metadata batch, including files pruned by LIMIT.
+            if prune_by_limit.is_some() && !retained_file_urls.contains(&url) {
+                return ready(Ok(None));
+            }
             ready(match dv {
                 Some(mask) => validate_dv_mask(&mask, num_records, cardinality, &url)
                     .map(|()| Some((url.to_string(), mask)))
@@ -416,7 +466,11 @@ async fn replay_files(
     let metrics = ExecutionPlanMetricsSet::new();
     // A gauge, because a runtime filter can skip planned files.
     let files_scanned = MetricBuilder::new(&metrics).global_gauge("count_files_scanned");
-    files_scanned.add(stream.metrics.num_scanned);
+    files_scanned.add(files.len());
+    let pruned_by_limit = stream.metrics.num_scanned.saturating_sub(files.len());
+    MetricBuilder::new(&metrics)
+        .global_counter("count_files_pruned_by_limit")
+        .add(pruned_by_limit);
 
     Ok(ReplayedScanFiles {
         files,
@@ -1119,16 +1173,10 @@ fn finalize_transformed_batch(
             // The batch adapter targets a nullability-relaxed schema (see
             // `expr_adapter`). Restamp to the strict logical schema; this
             // validates actual data nulls rather than declared nullability.
-            let output_schema = rewrite_schema_with_nullable_fields(
-                scan_plan.contract.result_schema.clone()
-            );
-            crate::kernel::cast_record_batch(
-                &adapted,
-                output_schema,
-                false,
-                false,
-            )
-            .map_err(|e| DataFusionError::External(Box::new(e)))?
+            let output_schema =
+                rewrite_schema_with_nullable_fields(scan_plan.contract.result_schema.clone());
+            crate::kernel::cast_record_batch(&adapted, output_schema, false, false)
+                .map_err(|e| DataFusionError::External(Box::new(e)))?
         }
     };
     if let Some((arr, field)) = file_id_col {
@@ -1566,6 +1614,7 @@ mod tests {
             stats: Statistics::new_unknown(&Schema::empty()),
             num_records: None,
             partitions: None,
+            has_deletion_vector: false,
         }
     }
 

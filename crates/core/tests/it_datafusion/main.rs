@@ -22,4 +22,5 @@ mod operation_scope;
 mod read_delta_log_test;
 mod read_delta_partitions_test;
 mod scan_file_statistics;
+mod stats_parsed_checkpoint;
 mod timestamp_statistics;
