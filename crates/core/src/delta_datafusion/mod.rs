@@ -84,6 +84,14 @@ pub(crate) use table_provider::{
     next::FILE_ID_COLUMN_DEFAULT, resolve_file_column_name, update_datafusion_session,
 };
 
+/// Converts a Delta Kernel expression to a DataFusion expression.
+pub fn to_datafusion_expr(
+    expr: &delta_kernel::expressions::Expression,
+    output_type: &delta_kernel::schema::DataType,
+) -> DataFusionResult<Expr> {
+    engine::to_datafusion_expr(expr, output_type)
+}
+
 pub(crate) const PATH_COLUMN: &str = "__delta_rs_path";
 
 #[doc(hidden)]
