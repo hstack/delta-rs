@@ -21,3 +21,4 @@ mod read_delta_log_test;
 mod read_delta_partitions_test;
 mod stats_parsed_checkpoint;
 mod integration_datafusion_deep;
+pub mod integration_datafusion_predicate;
