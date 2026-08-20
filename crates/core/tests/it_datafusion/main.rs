@@ -16,6 +16,7 @@ mod integration;
 mod integration_checkpoint;
 mod integration_datafusion;
 mod integration_datafusion_deep;
+pub mod integration_datafusion_predicate;
 #[cfg(feature = "nanosecond-timestamps")]
 mod nanosecond_timestamps;
 mod read_delta_log_test;
