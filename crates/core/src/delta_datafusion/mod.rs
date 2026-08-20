@@ -50,6 +50,7 @@ use datafusion::physical_plan::ExecutionPlan;
 use datafusion_proto::logical_plan::LogicalExtensionCodec;
 use datafusion_proto::physical_plan::{PhysicalExtensionCodec, PhysicalProtoConverterExtension};
 use delta_kernel::engine::arrow_conversion::TryIntoArrow as _;
+use delta_kernel::schema::StructType;
 use either::Either;
 
 use crate::delta_datafusion::expr::parse_predicate_expression;
@@ -84,6 +85,16 @@ pub use table_provider::{
 pub(crate) use table_provider::{
     next::FILE_ID_COLUMN_DEFAULT, resolve_file_column_name, update_datafusion_session,
 };
+
+/// Converts a Delta Kernel expression to a DataFusion expression.
+pub fn to_datafusion_expr(
+    expr: &delta_kernel::expressions::Expression,
+    input_schema: &StructType,
+    output_type: &delta_kernel::schema::DataType,
+) -> DataFusionResult<Expr> {
+    engine::to_datafusion_expr(expr, input_schema, Some(output_type))
+        .map_err(|err| DataFusionError::External(Box::new(err)))
+}
 
 pub(crate) const PATH_COLUMN: &str = "__delta_rs_path";
 
