@@ -1,23 +1,38 @@
+use crate::{builder_from_valid_url, open_table_with_storage_options};
 use async_trait::async_trait;
 use datafusion::catalog::{TableFunctionImpl, TableProvider};
-use datafusion::common::{internal_datafusion_err, DataFusionError, Result, ScalarValue};
+use datafusion::common::{DataFusionError, Result, ScalarValue, internal_datafusion_err};
 use datafusion::logical_expr::Expr;
 use datafusion::prelude::SessionContext;
+use delta_kernel::Engine;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use tokio::runtime::Runtime;
 use url::Url;
-use crate::open_table_with_storage_options;
 
-pub fn register_delta_table_udtf(ctx: &SessionContext, name: Option<&str>, settings: Option<&HashMap<String, String>>) {
-    let prefix = name
-        .or_else(|| Some("delta_table")).unwrap();
+pub fn register_delta_table_udtf(
+    ctx: &SessionContext,
+    name: Option<&str>,
+    settings: Option<&HashMap<String, String>>,
+) {
+    register_delta_table_udtf_with_engine(ctx, name, settings, None);
+}
+
+/// Register both table functions, using the supplied engine for the next provider.
+pub fn register_delta_table_udtf_with_engine(
+    ctx: &SessionContext,
+    name: Option<&str>,
+    settings: Option<&HashMap<String, String>>,
+    engine: Option<Arc<dyn Engine>>,
+) {
+    let prefix = name.or_else(|| Some("delta_table")).unwrap();
 
     ctx.register_udtf(
         prefix,
         Arc::new(DeltaTableUdtf {
             flavor: DeltaTableUdtfFlavor::Old,
             settings: settings.cloned(),
+            engine: None,
         }),
     );
     ctx.register_udtf(
@@ -25,6 +40,7 @@ pub fn register_delta_table_udtf(ctx: &SessionContext, name: Option<&str>, setti
         Arc::new(DeltaTableUdtf {
             flavor: DeltaTableUdtfFlavor::Next,
             settings: settings.cloned(),
+            engine,
         }),
     );
 }
@@ -32,13 +48,23 @@ pub fn register_delta_table_udtf(ctx: &SessionContext, name: Option<&str>, setti
 #[derive(Debug, Clone)]
 pub enum DeltaTableUdtfFlavor {
     Old,
-    Next
+    Next,
 }
 
-#[derive(Debug)]
 pub struct DeltaTableUdtf {
     flavor: DeltaTableUdtfFlavor,
     settings: Option<HashMap<String, String>>,
+    engine: Option<Arc<dyn Engine>>,
+}
+
+impl std::fmt::Debug for DeltaTableUdtf {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeltaTableUdtf")
+            .field("flavor", &self.flavor)
+            .field("settings", &self.settings)
+            .field("has_engine", &self.engine.is_some())
+            .finish()
+    }
 }
 
 #[async_trait]
@@ -66,7 +92,11 @@ impl TableFunctionImpl for DeltaTableUdtf {
         let path = args_string
             .pop_front()
             .expect("DeltaTableUdtf missing path");
-        assert_eq!(args_string.len() % 2, 0, "DeltaTableUdtf: Can't build hashmap out of odd-sized args");
+        assert_eq!(
+            args_string.len() % 2,
+            0,
+            "DeltaTableUdtf: Can't build hashmap out of odd-sized args"
+        );
 
         let settings = if let Some(global_settings) = &self.settings {
             global_settings.clone()
@@ -75,35 +105,59 @@ impl TableFunctionImpl for DeltaTableUdtf {
         };
 
         let flavor = self.flavor.clone();
+        let engine = self.engine.clone();
         let table = std::thread::spawn(move || {
             let rt = Runtime::new().unwrap();
-            let table_uri = Url::parse(&path)
-                .expect(&format!("Invalid table uri: {}", path));
+            let table_uri = Url::parse(&path).expect(&format!("Invalid table uri: {}", path));
             rt.block_on(async {
-                let delta_table = open_table_with_storage_options(table_uri, settings)
-                    .await
-                    .map_err(|e| { internal_datafusion_err!("DeltaTableUdtf could not open table at {}: {}",&path,e.to_string()) })
-                    .unwrap();
-
                 match flavor {
                     DeltaTableUdtfFlavor::Old => {
-                        let provider = delta_table.table_provider_old();
-                        Arc::new(provider) as Arc<dyn TableProvider>
+                        let delta_table = open_table_with_storage_options(table_uri, settings)
+                            .await
+                            .map_err(|e| {
+                                internal_datafusion_err!(
+                                    "DeltaTableUdtf could not open table at {}: {}",
+                                    &path,
+                                    e.to_string()
+                                )
+                            })
+                            .unwrap();
+                        Arc::new(delta_table.table_provider_old()) as Arc<dyn TableProvider>
                     }
                     DeltaTableUdtfFlavor::Next => {
-                        let provider = delta_table
-                            .table_provider()
+                        let mut builder = builder_from_valid_url(table_uri)
+                            .map_err(|e| {
+                                internal_datafusion_err!(
+                                    "DeltaTableUdtf could not open table at {}: {}",
+                                    &path,
+                                    e.to_string()
+                                )
+                            })
+                            .unwrap()
+                            .with_storage_options(settings)
+                            .with_checkpoint_stats_json_fallback(true);
+                        if let Some(engine) = engine {
+                            builder = builder.with_engine(engine);
+                        }
+                        let delta_table = builder
                             .build()
-                            .await
+                            .map_err(|e| {
+                                internal_datafusion_err!(
+                                    "DeltaTableUdtf could not open table at {}: {}",
+                                    &path,
+                                    e.to_string()
+                                )
+                            })
                             .unwrap();
+                        let provider = delta_table.table_provider().build().await.unwrap();
                         Arc::new(provider) as Arc<dyn TableProvider>
                     }
                 }
             })
         })
         .join()
-        .map_err(|e| internal_datafusion_err!("DeltaTableFunc error opening table"))?;
+        .map_err(|_e| internal_datafusion_err!("DeltaTableFunc error opening table"))?;
 
-        Ok(Arc::clone(&table))
+        Ok(table.clone())
     }
 }
