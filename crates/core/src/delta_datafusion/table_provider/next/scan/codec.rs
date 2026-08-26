@@ -4,6 +4,7 @@
 //! Expressions are serialized via DataFusion protobuf; kernel `Transform` expressions
 //! use a custom wire format since they have no DataFusion equivalent.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef;
@@ -11,6 +12,7 @@ use dashmap::DashMap;
 use datafusion::common::HashMap;
 use datafusion::error::DataFusionError;
 use datafusion::execution::TaskContext;
+use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::prelude::Expr;
 use datafusion_datasource::file_scan_config::{FileScanConfig, FileScanConfigBuilder};
@@ -20,7 +22,7 @@ use datafusion_proto::physical_plan::PhysicalExtensionCodec;
 use delta_kernel::expressions::{ColumnName, Expression, ExpressionFieldPatch, ExpressionStructPatch};
 use delta_kernel::schema::{DataType as KernelDataType};
 use serde::{Deserialize, Serialize};
-use super::{DeltaScanExec, ProjectedScanContract, PublicFileIdMap};
+use super::{DeltaScanExec, DeltaScanMetaExec, ProjectedScanContract, PublicFileIdMap};
 use super::plan::KernelScanPlan;
 use crate::delta_datafusion::engine::{to_datafusion_expr, to_delta_expression};
 use crate::delta_datafusion::DeltaScanConfig;
@@ -117,67 +119,66 @@ pub(crate) struct ProjectedScanContractWire {
     row_index_column: Option<String>,
 }
 
+/// Build the [`ScanPlanWire`] shared by both scan codecs.
+fn scan_plan_wire(scan_plan: &KernelScanPlan) -> Result<ScanPlanWire, DataFusionError> {
+    let snapshot = {
+        let exec_scan_plan_scan_snapshot = scan_plan.scan.snapshot().clone();
+        // @HSTACK FIXME AT upgrade
+        // ATM, DeltaTableConfig is ONLY used with defaults
+        // The only thing that we set in it is the log_size_limiter -
+        //      which has already been used early in the logical / planning phase
+        // At upgrade, RECHECK usage sites for DeltaTableConfig, we'll need to re-evaluate if
+        //      stuff begins writing to it
+        let delta_table_config = DeltaTableConfig::default();
+        let load_metrics = SnapshotLoadMetrics::from_snapshot(&exec_scan_plan_scan_snapshot);
+        Snapshot {
+            inner: exec_scan_plan_scan_snapshot,
+            config: delta_table_config,
+            materialized_files: None,
+            load_metrics,
+        }
+    };
+
+    let row_index_column = scan_plan
+        .contract
+        .row_index_field
+        .as_ref()
+        .map(|f| f.name().clone());
+
+    let projected_scan_contract_wire = ProjectedScanContractWire {
+        table_schema: scan_plan.contract.table_schema.clone(),
+        provider_schema: scan_plan.contract.provider_schema.clone(),
+        projection: scan_plan.contract.projection.clone(),
+        filters: scan_plan
+            .contract
+            .filters
+            .iter()
+            .map(|p| p.to_bytes().map(|b| b.to_vec()).unwrap())
+            .collect::<Vec<_>>(),
+        row_index_column,
+    };
+
+    Ok(ScanPlanWire {
+        snapshot,
+        contract: projected_scan_contract_wire,
+        filters: scan_plan
+            .filters
+            .iter()
+            .map(|p| p.to_bytes().map(|b| b.to_vec()).unwrap())
+            .collect::<Vec<_>>(),
+        skipping_predicate: scan_plan.skipping_predicate.clone().map(|sp| {
+            sp.iter()
+                .map(|e| e.to_bytes().map(|b| b.to_vec()).unwrap())
+                .collect::<Vec<_>>()
+        }),
+    })
+}
+
 impl TryFrom<&DeltaScanExec> for DeltaScanExecWire {
     type Error = DataFusionError;
 
     fn try_from(exec: &DeltaScanExec) -> Result<Self, Self::Error> {
-        let snapshot = {
-            let exec_scan_plan_scan_snapshot = exec.scan_plan.scan.snapshot().clone();
-            // @HSTACK FIXME AT upgrade
-            // ATM, DeltaTableConfig is ONLY used with defaults
-            // The only thing that we set in it is the log_size_limiter -
-            //      which has already been used early in the logical / planning phase
-            // At upgrade, RECHECK usage sites for DeltaTableConfig, we'll need to re-evaluate if
-            //      stuff begins writing to it
-            let delta_table_config = DeltaTableConfig::default();
-            let load_metrics = SnapshotLoadMetrics::from_snapshot(&exec_scan_plan_scan_snapshot);
-            Snapshot {
-                inner: exec_scan_plan_scan_snapshot,
-                config: delta_table_config,
-                materialized_files: None,
-                load_metrics,
-            }
-        };
-
-        let scan_plan = &exec.scan_plan;
-        let row_index_column = scan_plan.contract.row_index_field
-            .as_ref()
-            .map(|f| f.name().clone());
-
-        let projected_scan_contract_wire = ProjectedScanContractWire {
-            table_schema: scan_plan.contract.table_schema.clone(),
-            provider_schema: scan_plan.contract.provider_schema.clone(),
-            projection: scan_plan.contract.projection.clone(),
-            filters: scan_plan.contract.filters
-                .iter()
-                .map(|p| {
-                    p.to_bytes().map(|b| b.to_vec()).unwrap()
-                })
-                .collect::<Vec<_>>(),
-            row_index_column,
-        };
-
-        let scan_plan_wire = ScanPlanWire {
-            snapshot,
-            contract: projected_scan_contract_wire,
-            filters: scan_plan
-                .filters
-                .iter()
-                .map(|p| {
-                    p.to_bytes().map(|b| b.to_vec()).unwrap()
-                })
-                .collect::<Vec<_>>(),
-            skipping_predicate: scan_plan
-                .skipping_predicate
-                .clone()
-                .map(|sp| {
-                    let out: Vec<Vec<u8>> = sp
-                        .iter()
-                        .map(|e| e.to_bytes().map(|b| b.to_vec()).unwrap())
-                        .collect::<Vec<_>>();
-                    out
-                })
-        };
+        let scan_plan_wire = scan_plan_wire(&exec.scan_plan)?;
 
         let transforms: std::collections::HashMap<String, StructPatchWire> = exec
             .transforms
@@ -429,6 +430,176 @@ impl DeltaScanExecWire {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct DeltaScanMetaPhysicalCodec;
+
+impl PhysicalExtensionCodec for DeltaScanMetaPhysicalCodec {
+    fn try_decode(
+        &self,
+        buf: &[u8],
+        inputs: &[Arc<dyn ExecutionPlan>],
+        ctx: &TaskContext,
+    ) -> datafusion::common::Result<Arc<dyn ExecutionPlan>> {
+        if !inputs.is_empty() {
+            return Err(DataFusionError::Internal(format!(
+                "DeltaScanMetaExec expects 0 inputs, got {}",
+                inputs.len()
+            )));
+        }
+
+        let wire: DeltaScanMetaExecWire = serde_json::from_slice(buf).map_err(|e| {
+            DataFusionError::Internal(format!("Failed to decode DeltaScanMetaExec: {e}"))
+        })?;
+
+        wire.into_exec(ctx)
+    }
+
+    fn try_encode(
+        &self,
+        node: Arc<dyn ExecutionPlan>,
+        buf: &mut Vec<u8>,
+    ) -> datafusion::common::Result<()> {
+        let meta_scan = node.downcast_ref::<DeltaScanMetaExec>().ok_or_else(|| {
+            DataFusionError::Internal("Expected DeltaScanMetaExec for encoding".to_string())
+        })?;
+
+        let wire = DeltaScanMetaExecWire::try_from(meta_scan)?;
+        serde_json::to_writer(buf, &wire).map_err(|e| {
+            DataFusionError::Internal(format!("Failed to encode DeltaScanMetaExec: {e}"))
+        })?;
+        Ok(())
+    }
+}
+
+/// Wire format for serializing [`DeltaScanMetaExec`].
+///
+/// Unlike [`DeltaScanExecWire`], there is no child plan: the per-partition
+/// `(file_id, row_count)` inputs are serialized directly.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct DeltaScanMetaExecWire {
+    scan: ScanPlanWire,
+    input: Vec<VecDeque<(String, usize)>>,
+    transforms: std::collections::HashMap<String, StructPatchWire>,
+    selection_vectors: std::collections::HashMap<String, Vec<bool>>,
+    file_id_column: Option<String>,
+    public_file_ids: std::collections::HashMap<String, String>,
+}
+
+impl TryFrom<&DeltaScanMetaExec> for DeltaScanMetaExecWire {
+    type Error = DataFusionError;
+
+    fn try_from(exec: &DeltaScanMetaExec) -> Result<Self, Self::Error> {
+        let scan_plan_wire = scan_plan_wire(&exec.scan_plan)?;
+
+        let transforms: std::collections::HashMap<String, StructPatchWire> = exec
+            .transforms
+            .iter()
+            .map(|(file_id, kernel_expr)| {
+                serialize_transform(kernel_expr.as_ref()).map(|wire| (file_id.clone(), wire))
+            })
+            .collect::<Result<_, _>>()?;
+
+        let selection_vectors: std::collections::HashMap<String, Vec<bool>> = exec
+            .selection_vectors
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
+            .collect();
+
+        let public_file_ids = exec
+            .public_file_ids
+            .as_ref()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect::<std::collections::HashMap<String, String>>();
+
+        Ok(Self {
+            scan: scan_plan_wire,
+            input: exec.input.clone(),
+            transforms,
+            selection_vectors,
+            file_id_column: exec.file_id_field.as_ref().map(|f| f.name().clone()),
+            public_file_ids,
+        })
+    }
+}
+
+impl DeltaScanMetaExecWire {
+    /// Reconstruct a [`DeltaScanMetaExec`] from the wire format.
+    fn into_exec(self, task: &TaskContext) -> datafusion::common::Result<Arc<dyn ExecutionPlan>> {
+        let mut delta_scan_config = DeltaScanConfig::new();
+        if let Some(fic) = self.file_id_column {
+            delta_scan_config = delta_scan_config.with_file_column_name(fic);
+        }
+
+        let filters = self
+            .scan
+            .contract
+            .filters
+            .iter()
+            .map(|b| Expr::from_bytes_with_ctx(b, task).unwrap())
+            .collect::<Vec<_>>();
+
+        let row_index_column = self.scan.contract.row_index_column.clone();
+
+        let contract = ProjectedScanContract::try_new(
+            self.scan.contract.table_schema.clone(),
+            self.scan.contract.provider_schema.clone(),
+            &delta_scan_config,
+            row_index_column.as_deref(),
+            self.scan.contract.projection.as_ref(),
+            &filters,
+        )?;
+
+        let file_id_field = contract
+            .retain_file_id
+            .then(|| contract.file_id_field.clone());
+
+        let skipping_predicate = self.scan.skipping_predicate.map(|osp| {
+            osp.iter()
+                .map(|b| Expr::from_bytes_with_ctx(b, task).unwrap())
+                .collect::<Vec<_>>()
+        });
+
+        let scan_plan = KernelScanPlan::try_new_with_contract(
+            &self.scan.snapshot,
+            contract,
+            &filters,
+            &delta_scan_config,
+            skipping_predicate,
+        )?;
+
+        let transforms: HashMap<String, Arc<Expression>> = self
+            .transforms
+            .into_iter()
+            .map(|(file_id, wire)| {
+                deserialize_transform(wire).map(|expr| (file_id, Arc::new(expr)))
+            })
+            .collect::<Result<_, _>>()?;
+
+        let selection_vectors: DashMap<String, Vec<bool>> =
+            self.selection_vectors.into_iter().collect();
+
+        let mut public_file_ids = PublicFileIdMap::default();
+        if scan_plan.contract.retain_file_id {
+            for (k, v) in self.public_file_ids.iter() {
+                public_file_ids.insert(k.clone(), v.clone());
+            }
+        }
+
+        let exec = DeltaScanMetaExec::new(
+            Arc::new(scan_plan),
+            self.input,
+            Arc::new(transforms),
+            Arc::new(selection_vectors),
+            Arc::new(public_file_ids),
+            file_id_field,
+            ExecutionPlanMetricsSet::new(),
+        );
+
+        Ok(Arc::new(exec))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -469,6 +640,29 @@ mod tests {
 
     fn extract_delta_scan_exec(plan: &Arc<dyn ExecutionPlan>) -> Option<&DeltaScanExec> {
         plan.downcast_ref::<DeltaScanExec>()
+    }
+
+    /// Build a metadata-only scan by projecting no data columns.
+    async fn create_delta_scan_meta_exec_from_table(
+        table: TestTables,
+        filters: &[Expr],
+    ) -> TestResult<Arc<dyn ExecutionPlan>> {
+        let log_store = table.table_builder()?.build_storage()?;
+        let snapshot = Snapshot::try_new(&log_store, Default::default(), None).await?;
+        let provider = DeltaScan::builder().with_snapshot(snapshot).await?;
+
+        let session = Arc::new(create_session().into_inner());
+        let state = session.state_ref().read().clone();
+
+        let empty_projection = vec![];
+        let plan = provider
+            .scan(&state, Some(&empty_projection), filters, None)
+            .await?;
+        Ok(plan)
+    }
+
+    fn extract_delta_scan_meta_exec(plan: &Arc<dyn ExecutionPlan>) -> Option<&DeltaScanMetaExec> {
+        plan.downcast_ref::<DeltaScanMetaExec>()
     }
 
     #[tokio::test]
@@ -620,6 +814,15 @@ mod tests {
         let input = delta_scan.children()[0].clone();
         let result = codec.try_decode(&buf, &[input.clone(), input], &task_ctx);
         assert!(result.is_err(), "Should fail with 2 inputs");
+
+        let meta_plan =
+            create_delta_scan_meta_exec_from_table(TestTables::WithColumnMapping, &[]).await?;
+        let meta_codec = DeltaScanMetaPhysicalCodec;
+        let mut meta_buf = Vec::new();
+        meta_codec.try_encode(meta_plan.clone(), &mut meta_buf)?;
+
+        let result = meta_codec.try_decode(&meta_buf, &[meta_plan], &task_ctx);
+        assert!(result.is_err(), "Metadata codec should fail with 1 input");
 
         Ok(())
     }
@@ -782,6 +985,163 @@ mod tests {
         for key in delta_scan.transforms.keys() {
             assert!(
                 decoded_delta_scan.transforms.contains_key(key),
+                "Decoded should have transform for key {key}"
+            );
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_meta_codec_roundtrip_basic() -> TestResult {
+        let plan =
+            create_delta_scan_meta_exec_from_table(TestTables::WithColumnMapping, &[]).await?;
+        let meta_scan =
+            extract_delta_scan_meta_exec(&plan).expect("Expected DeltaScanMetaExec");
+
+        let codec = DeltaScanMetaPhysicalCodec;
+
+        let mut buf = Vec::new();
+        codec.try_encode(plan.clone(), &mut buf)?;
+        assert!(!buf.is_empty(), "Encoded buffer should not be empty");
+
+        let session = create_session().into_inner();
+        let task_ctx = session.task_ctx();
+
+        let decoded = codec.try_decode(&buf, &[], &task_ctx)?;
+        let decoded_meta =
+            extract_delta_scan_meta_exec(&decoded).expect("Expected DeltaScanMetaExec after decode");
+
+        assert_eq!(
+            meta_scan.scan_plan.contract.result_schema,
+            decoded_meta.scan_plan.contract.result_schema,
+            "Result schemas should match"
+        );
+        assert_eq!(
+            meta_scan.input, decoded_meta.input,
+            "Per-file (file_id, row_count) inputs should match"
+        );
+        assert_eq!(
+            meta_scan.partition_statistics(None)?.num_rows,
+            decoded_meta.partition_statistics(None)?.num_rows,
+            "Exact row counts should match"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_meta_codec_roundtrip_with_filter() -> TestResult {
+        // Filter on the partition column so pushdown is Exact and the scan stays
+        // metadata-only (otherwise data must be read, yielding a DeltaScanExec).
+        let filters = vec![col("Company Very Short").eq(lit("BMS"))];
+        let plan =
+            create_delta_scan_meta_exec_from_table(TestTables::WithColumnMapping, &filters).await?;
+        let meta_scan =
+            extract_delta_scan_meta_exec(&plan).expect("Expected DeltaScanMetaExec");
+
+        let codec = DeltaScanMetaPhysicalCodec;
+
+        let mut buf = Vec::new();
+        codec.try_encode(plan.clone(), &mut buf)?;
+
+        let session = create_session().into_inner();
+        let task_ctx = session.task_ctx();
+
+        let decoded = codec.try_decode(&buf, &[], &task_ctx)?;
+        let decoded_meta =
+            extract_delta_scan_meta_exec(&decoded).expect("Expected DeltaScanMetaExec after decode");
+
+        assert_eq!(
+            meta_scan.scan_plan.contract.result_schema,
+            decoded_meta.scan_plan.contract.result_schema,
+            "Result schemas should match with filter"
+        );
+        assert_eq!(
+            meta_scan.partition_statistics(None)?.num_rows,
+            decoded_meta.partition_statistics(None)?.num_rows,
+            "Exact row counts should match with filter"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_meta_codec_roundtrip_with_deletion_vectors() -> TestResult {
+        let plan =
+            create_delta_scan_meta_exec_from_table(TestTables::WithDvSmall, &[]).await?;
+        let meta_scan =
+            extract_delta_scan_meta_exec(&plan).expect("Expected DeltaScanMetaExec");
+        assert!(
+            !meta_scan.selection_vectors.is_empty(),
+            "Table with deletion vectors should have non-empty selection_vectors"
+        );
+
+        let codec = DeltaScanMetaPhysicalCodec;
+
+        let mut buf = Vec::new();
+        codec.try_encode(plan.clone(), &mut buf)?;
+
+        let session = create_session().into_inner();
+        let task_ctx = session.task_ctx();
+
+        let decoded = codec.try_decode(&buf, &[], &task_ctx)?;
+        let decoded_meta =
+            extract_delta_scan_meta_exec(&decoded).expect("Expected DeltaScanMetaExec after decode");
+
+        assert_eq!(
+            meta_scan.selection_vectors.len(),
+            decoded_meta.selection_vectors.len(),
+            "Selection vectors count should match"
+        );
+        for entry in meta_scan.selection_vectors.iter() {
+            let decoded_vec = decoded_meta
+                .selection_vectors
+                .get(entry.key())
+                .expect("Decoded should have same keys");
+            assert_eq!(
+                entry.value().as_slice(),
+                decoded_vec.value().as_slice(),
+                "Selection vector values should match for key {}",
+                entry.key()
+            );
+        }
+        assert_eq!(
+            meta_scan.partition_statistics(None)?.num_rows,
+            decoded_meta.partition_statistics(None)?.num_rows,
+            "Exact row counts should match with deletion vectors"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_meta_codec_roundtrip_with_transforms() -> TestResult {
+        let plan =
+            create_delta_scan_meta_exec_from_table(TestTables::WithColumnMapping, &[]).await?;
+        let meta_scan =
+            extract_delta_scan_meta_exec(&plan).expect("Expected DeltaScanMetaExec");
+
+        let codec = DeltaScanMetaPhysicalCodec;
+
+        let mut buf = Vec::new();
+        codec.try_encode(plan.clone(), &mut buf)?;
+
+        let session = create_session().into_inner();
+        let task_ctx = session.task_ctx();
+
+        let decoded = codec.try_decode(&buf, &[], &task_ctx)?;
+        let decoded_meta =
+            extract_delta_scan_meta_exec(&decoded).expect("Expected DeltaScanMetaExec after decode");
+
+        assert_eq!(
+            meta_scan.transforms.len(),
+            decoded_meta.transforms.len(),
+            "Transforms count should match"
+        );
+        for key in meta_scan.transforms.keys() {
+            assert!(
+                decoded_meta.transforms.contains_key(key),
                 "Decoded should have transform for key {key}"
             );
         }
