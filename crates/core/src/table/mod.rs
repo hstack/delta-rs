@@ -32,6 +32,7 @@ pub use blind::BlindDeltaTable;
 
 // Re-exposing for backwards compatibility
 pub use columns::*;
+use crate::kernel::size_limits::SnapshotLoadMetrics;
 
 /// In memory representation of a Delta Table
 ///
@@ -196,6 +197,18 @@ impl DeltaTable {
     /// Returns `None` if the table has not been loaded.
     pub fn version(&self) -> Option<Version> {
         self.state.as_ref().map(|s| s.version())
+    }
+
+    /// Returns the metrics captured during snapshot loading.
+    ///
+    /// This method provides access to information about how the snapshot was loaded,
+    /// including whether log size limiting was applied and if truncation occurred.
+    ///
+    /// ## Returns
+    ///
+    /// A reference to the snapshot load metrics if the table has been loaded, `None` otherwise.
+    pub fn snapshot_load_metrics(&self) -> Option<&SnapshotLoadMetrics> {
+        self.state.as_ref().map(|s| s.snapshot().load_metrics())
     }
 
     /// Load DeltaTable with data from latest checkpoint
