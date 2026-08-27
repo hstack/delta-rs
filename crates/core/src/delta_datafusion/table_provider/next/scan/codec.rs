@@ -150,6 +150,7 @@ fn scan_plan_wire(scan_plan: &KernelScanPlan) -> Result<ScanPlanWire, DataFusion
             inner: exec_scan_plan_scan_snapshot,
             config: delta_table_config,
             materialized_files: None,
+            load_metrics,
         }
     };
 
