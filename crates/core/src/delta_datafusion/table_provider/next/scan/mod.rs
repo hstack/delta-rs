@@ -64,7 +64,7 @@ use object_store::{ObjectMeta, path::Path};
 use tracing::debug;
 use url::Url;
 
-pub use self::codec::{DeltaNextPhysicalCodec, DeltaScanMetaPhysicalCodec};
+pub use self::codec::DeltaNextPhysicalCodec;
 pub use self::exec::DeltaScanExec;
 pub(crate) use self::exec_meta::DeltaScanMetaExec;
 use self::expr_adapter::{DeltaPhysicalExprAdapterFactory, relax_schema_nested_nullability};

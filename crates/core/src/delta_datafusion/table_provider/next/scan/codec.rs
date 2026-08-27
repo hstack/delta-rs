@@ -45,11 +45,14 @@ impl PhysicalExtensionCodec for DeltaNextPhysicalCodec {
         inputs: &[Arc<dyn ExecutionPlan>],
         ctx: &TaskContext,
     ) -> datafusion::common::Result<Arc<dyn ExecutionPlan>> {
-        let wire: DeltaScanExecWire = serde_json::from_slice(buf).map_err(|e| {
-            DataFusionError::Internal(format!("Failed to decode DeltaScanExec: {e}"))
+        let wire: ScanExecWire = serde_json::from_slice(buf).map_err(|e| {
+            DataFusionError::Internal(format!("Failed to decode Delta scan exec: {e}"))
         })?;
 
-        wire.into_exec(inputs, ctx)
+        match wire {
+            ScanExecWire::Scan(wire) => wire.into_exec(inputs, ctx),
+            ScanExecWire::Meta(wire) => wire.into_exec(inputs, ctx),
+        }
     }
 
     fn try_encode(
@@ -57,16 +60,28 @@ impl PhysicalExtensionCodec for DeltaNextPhysicalCodec {
         node: Arc<dyn ExecutionPlan>,
         buf: &mut Vec<u8>,
     ) -> datafusion::common::Result<()> {
-        let delta_scan = node.downcast_ref::<DeltaScanExec>().ok_or_else(|| {
-            DataFusionError::Internal("Expected DeltaScanExec for encoding".to_string())
-        })?;
+        let wire = if let Some(delta_scan) = node.downcast_ref::<DeltaScanExec>() {
+            ScanExecWire::Scan(DeltaScanExecWire::try_from(delta_scan)?)
+        } else if let Some(meta_scan) = node.downcast_ref::<DeltaScanMetaExec>() {
+            ScanExecWire::Meta(DeltaScanMetaExecWire::try_from(meta_scan)?)
+        } else {
+            return Err(DataFusionError::Internal(
+                "Expected DeltaScanExec or DeltaScanMetaExec for encoding".to_string(),
+            ));
+        };
 
-        let wire = DeltaScanExecWire::try_from(delta_scan)?;
         serde_json::to_writer(buf, &wire).map_err(|e| {
-            DataFusionError::Internal(format!("Failed to encode DeltaScanExec: {e}"))
+            DataFusionError::Internal(format!("Failed to encode Delta scan exec: {e}"))
         })?;
         Ok(())
     }
+}
+
+/// Tagged wire wrapper dispatching between the two scan exec variants.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) enum ScanExecWire {
+    Scan(DeltaScanExecWire),
+    Meta(DeltaScanMetaExecWire),
 }
 
 /// Wire format for a kernel FieldTransform.
@@ -430,47 +445,6 @@ impl DeltaScanExecWire {
     }
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct DeltaScanMetaPhysicalCodec;
-
-impl PhysicalExtensionCodec for DeltaScanMetaPhysicalCodec {
-    fn try_decode(
-        &self,
-        buf: &[u8],
-        inputs: &[Arc<dyn ExecutionPlan>],
-        ctx: &TaskContext,
-    ) -> datafusion::common::Result<Arc<dyn ExecutionPlan>> {
-        if !inputs.is_empty() {
-            return Err(DataFusionError::Internal(format!(
-                "DeltaScanMetaExec expects 0 inputs, got {}",
-                inputs.len()
-            )));
-        }
-
-        let wire: DeltaScanMetaExecWire = serde_json::from_slice(buf).map_err(|e| {
-            DataFusionError::Internal(format!("Failed to decode DeltaScanMetaExec: {e}"))
-        })?;
-
-        wire.into_exec(ctx)
-    }
-
-    fn try_encode(
-        &self,
-        node: Arc<dyn ExecutionPlan>,
-        buf: &mut Vec<u8>,
-    ) -> datafusion::common::Result<()> {
-        let meta_scan = node.downcast_ref::<DeltaScanMetaExec>().ok_or_else(|| {
-            DataFusionError::Internal("Expected DeltaScanMetaExec for encoding".to_string())
-        })?;
-
-        let wire = DeltaScanMetaExecWire::try_from(meta_scan)?;
-        serde_json::to_writer(buf, &wire).map_err(|e| {
-            DataFusionError::Internal(format!("Failed to encode DeltaScanMetaExec: {e}"))
-        })?;
-        Ok(())
-    }
-}
-
 /// Wire format for serializing [`DeltaScanMetaExec`].
 ///
 /// Unlike [`DeltaScanExecWire`], there is no child plan: the per-partition
@@ -525,7 +499,18 @@ impl TryFrom<&DeltaScanMetaExec> for DeltaScanMetaExecWire {
 
 impl DeltaScanMetaExecWire {
     /// Reconstruct a [`DeltaScanMetaExec`] from the wire format.
-    fn into_exec(self, task: &TaskContext) -> datafusion::common::Result<Arc<dyn ExecutionPlan>> {
+    fn into_exec(
+        self,
+        inputs: &[Arc<dyn ExecutionPlan>],
+        task: &TaskContext,
+    ) -> datafusion::common::Result<Arc<dyn ExecutionPlan>> {
+        if !inputs.is_empty() {
+            return Err(DataFusionError::Internal(format!(
+                "DeltaScanMetaExec expects 0 inputs, got {}",
+                inputs.len()
+            )));
+        }
+
         let mut delta_scan_config = DeltaScanConfig::new();
         if let Some(fic) = self.file_id_column {
             delta_scan_config = delta_scan_config.with_file_column_name(fic);
@@ -604,9 +589,11 @@ impl DeltaScanMetaExecWire {
 mod tests {
     use std::sync::Arc;
 
+    use datafusion::physical_plan::joins::CrossJoinExec;
     use datafusion::physical_plan::ExecutionPlan;
     use datafusion::prelude::{col, lit};
-    use datafusion_proto::physical_plan::PhysicalExtensionCodec;
+    use datafusion_proto::physical_plan::{AsExecutionPlan, PhysicalExtensionCodec};
+    use datafusion_proto::protobuf;
 
     use crate::delta_datafusion::session::create_session;
     use crate::delta_datafusion::table_provider::next::DeltaScan;
@@ -817,12 +804,11 @@ mod tests {
 
         let meta_plan =
             create_delta_scan_meta_exec_from_table(TestTables::WithColumnMapping, &[]).await?;
-        let meta_codec = DeltaScanMetaPhysicalCodec;
         let mut meta_buf = Vec::new();
-        meta_codec.try_encode(meta_plan.clone(), &mut meta_buf)?;
+        codec.try_encode(meta_plan.clone(), &mut meta_buf)?;
 
-        let result = meta_codec.try_decode(&meta_buf, &[meta_plan], &task_ctx);
-        assert!(result.is_err(), "Metadata codec should fail with 1 input");
+        let result = codec.try_decode(&meta_buf, &[meta_plan], &task_ctx);
+        assert!(result.is_err(), "DeltaScanMetaExec should fail with 1 input");
 
         Ok(())
     }
@@ -999,7 +985,7 @@ mod tests {
         let meta_scan =
             extract_delta_scan_meta_exec(&plan).expect("Expected DeltaScanMetaExec");
 
-        let codec = DeltaScanMetaPhysicalCodec;
+        let codec = DeltaNextPhysicalCodec;
 
         let mut buf = Vec::new();
         codec.try_encode(plan.clone(), &mut buf)?;
@@ -1040,7 +1026,7 @@ mod tests {
         let meta_scan =
             extract_delta_scan_meta_exec(&plan).expect("Expected DeltaScanMetaExec");
 
-        let codec = DeltaScanMetaPhysicalCodec;
+        let codec = DeltaNextPhysicalCodec;
 
         let mut buf = Vec::new();
         codec.try_encode(plan.clone(), &mut buf)?;
@@ -1077,7 +1063,7 @@ mod tests {
             "Table with deletion vectors should have non-empty selection_vectors"
         );
 
-        let codec = DeltaScanMetaPhysicalCodec;
+        let codec = DeltaNextPhysicalCodec;
 
         let mut buf = Vec::new();
         codec.try_encode(plan.clone(), &mut buf)?;
@@ -1122,7 +1108,7 @@ mod tests {
         let meta_scan =
             extract_delta_scan_meta_exec(&plan).expect("Expected DeltaScanMetaExec");
 
-        let codec = DeltaScanMetaPhysicalCodec;
+        let codec = DeltaNextPhysicalCodec;
 
         let mut buf = Vec::new();
         codec.try_encode(plan.clone(), &mut buf)?;
@@ -1147,5 +1133,54 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    /// Test with a plan that has both DeltaScanMetaExec and DeltaScanExec
+    async fn join_roundtrip(meta_first: bool) -> TestResult {
+        let scan_plan = create_delta_scan_exec_from_table(TestTables::Simple, &[], None).await?;
+        let meta_plan =
+            create_delta_scan_meta_exec_from_table(TestTables::WithColumnMapping, &[]).await?;
+
+        let join: Arc<dyn ExecutionPlan> = if meta_first {
+            Arc::new(CrossJoinExec::new(meta_plan.clone(), scan_plan.clone()))
+        } else {
+            Arc::new(CrossJoinExec::new(scan_plan.clone(), meta_plan.clone()))
+        };
+
+        let codec = DeltaNextPhysicalCodec;
+        let proto = protobuf::PhysicalPlanNode::try_from_physical_plan(join.clone(), &codec)?;
+
+        let session = create_session().into_inner();
+        let task_ctx = session.task_ctx();
+        let decoded = proto.try_into_physical_plan(&task_ctx, &codec)?;
+
+        let decoded_children = decoded.children();
+        assert_eq!(decoded_children.len(), 2, "Join should have two children");
+
+        let (meta_idx, scan_idx) = if meta_first { (0, 1) } else { (1, 0) };
+        assert!(
+            decoded_children[meta_idx]
+                .downcast_ref::<DeltaScanMetaExec>()
+                .is_some(),
+            "Child {meta_idx} should decode to DeltaScanMetaExec"
+        );
+        assert!(
+            decoded_children[scan_idx]
+                .downcast_ref::<DeltaScanExec>()
+                .is_some(),
+            "Child {scan_idx} should decode to DeltaScanExec"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_codec_roundtrip_join_meta_first() -> TestResult {
+        join_roundtrip(true).await
+    }
+
+    #[tokio::test]
+    async fn test_codec_roundtrip_join_meta_last() -> TestResult {
+        join_roundtrip(false).await
     }
 }
