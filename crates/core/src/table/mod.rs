@@ -17,6 +17,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use url::Url;
 
 use self::state::DeltaTableState;
+use crate::kernel::size_limits::SnapshotLoadMetrics;
 use crate::kernel::{CommitInfo, DataCheck, LogicalFileView, Version};
 use crate::logstore::{
     LogStoreConfig, LogStoreExt, LogStoreRef, ObjectStoreRef, commit_uri_from_version,
@@ -200,6 +201,18 @@ impl DeltaTable {
     /// Returns `None` if the table has not been loaded.
     pub fn version(&self) -> Option<Version> {
         self.state.as_ref().map(|s| s.version())
+    }
+
+    /// Returns the metrics captured during snapshot loading.
+    ///
+    /// This method provides access to information about how the snapshot was loaded,
+    /// including whether log size limiting was applied and if truncation occurred.
+    ///
+    /// ## Returns
+    ///
+    /// A reference to the snapshot load metrics if the table has been loaded, `None` otherwise.
+    pub fn snapshot_load_metrics(&self) -> Option<&SnapshotLoadMetrics> {
+        self.state.as_ref().map(|s| s.snapshot().load_metrics())
     }
 
     /// Load DeltaTable with data from latest checkpoint
@@ -602,6 +615,46 @@ mod tests {
                 u.as_str()
             );
         }
+    }
+
+    #[tokio::test]
+    async fn snapshot_load_metrics_report_truncation() -> crate::test_utils::TestResult {
+        let fixture = crate::test_utils::TestTables::Simple;
+        let full = fixture.table_builder()?.load().await?;
+        let original = full.snapshot_load_metrics().expect("table is loaded");
+        assert!(!original.was_truncated());
+        assert_eq!(original.num_commit_files, 5);
+
+        let limited = fixture
+            .table_builder()?
+            .with_storage_options(std::collections::HashMap::from([
+                (
+                    "log_size_limiter.size_limit".to_string(),
+                    (original.loaded_log_segment_size - 1).to_string(),
+                ),
+                (
+                    "log_size_limiter.use_truncated_commit_log".to_string(),
+                    "true".to_string(),
+                ),
+                (
+                    "log_size_limiter.truncated_commit_log_size".to_string(),
+                    "1".to_string(),
+                ),
+            ]))
+            .load()
+            .await?;
+        let metrics = limited.snapshot_load_metrics().expect("table is loaded");
+        assert!(metrics.was_truncated());
+        assert_eq!(metrics.current_version, 4);
+        assert_eq!(metrics.oldest_version_loaded, Some(4));
+        assert_eq!(metrics.num_commit_files, 1);
+        assert_eq!(metrics.num_commits_discarded, Some(4));
+        assert_eq!(
+            metrics.original_log_segment_size,
+            Some(original.loaded_log_segment_size)
+        );
+        assert!(metrics.loaded_log_segment_size < original.loaded_log_segment_size);
+        Ok(())
     }
 
     #[tokio::test]

@@ -48,6 +48,7 @@ use crate::kernel::arrow::extract::{self as ex, ProvidesColumnByName};
 use super::{Action, CommitInfo, Metadata, Protocol};
 use crate::checkpoints::parse_last_checkpoint_hint;
 use crate::kernel::arrow::engine_ext::{ExpressionEvaluatorExt, rb_from_scan_meta};
+use crate::kernel::size_limits::SnapshotLoadMetrics;
 use crate::kernel::{ARROW_HANDLER, StructType, spawn_blocking_with_span};
 use crate::logstore::{LogStore, LogStoreExt};
 use crate::{DeltaResult, DeltaTableError};
@@ -203,6 +204,8 @@ pub struct Snapshot {
     pub(crate) inner: Arc<KernelSnapshot>,
     /// Optional materialized replay state owned by this snapshot.
     materialized_files: Option<Arc<MaterializedFiles>>,
+    /// Metrics captured during snapshot loading
+    pub(crate) load_metrics: SnapshotLoadMetrics,
 }
 
 impl Snapshot {
@@ -247,7 +250,7 @@ impl Snapshot {
             }
         };
 
-        let (snapshot, _load_metrics) = size_limits::apply_optional_log_limiter(
+        let (snapshot, load_metrics) = size_limits::apply_optional_log_limiter(
             snapshot,
             limiter,
             engine.as_ref(),
@@ -258,6 +261,7 @@ impl Snapshot {
         Ok(Self {
             inner: snapshot,
             materialized_files: None,
+            load_metrics,
         })
     }
 
@@ -326,9 +330,12 @@ impl Snapshot {
         .await
         .map_err(|e| DeltaTableError::Generic(e.to_string()))??;
 
+        let load_metrics = SnapshotLoadMetrics::from_snapshot(snapshot.as_ref());
+
         let snapshot = Arc::new(Self {
             inner: snapshot,
             materialized_files: None,
+            load_metrics,
         });
         if snapshot.version() as u64 == current_version {
             // `target_version` was `None`, but there were no new commits.
@@ -546,6 +553,11 @@ impl Snapshot {
             batches,
             self.table_configuration(),
         ))
+    }
+
+    /// Get the metrics captured during snapshot loading
+    pub fn load_metrics(&self) -> &SnapshotLoadMetrics {
+        &self.load_metrics
     }
 
     /// Get the table root of the snapshot
@@ -893,6 +905,7 @@ impl Snapshot {
         Self {
             inner: self.inner.clone(),
             materialized_files,
+            load_metrics: self.load_metrics.clone(),
         }
     }
 
@@ -1388,6 +1401,11 @@ impl EagerSnapshot {
         self.snapshot.protocol()
     }
 
+    /// Get the metrics captured during snapshot loading
+    pub fn load_metrics(&self) -> &SnapshotLoadMetrics {
+        self.snapshot.load_metrics()
+    }
+
     /// Well known table configuration
     pub fn table_properties(&self) -> &TableProperties {
         self.snapshot.table_properties()
@@ -1568,10 +1586,12 @@ mod tests {
 
             let engine = log_store.engine(None);
             let snapshot = KernelSnapshot::builder_for(table_url.clone()).build(engine.as_ref())?;
+            let load_metrics = SnapshotLoadMetrics::from_snapshot(snapshot.as_ref());
             Ok((
                 Self {
                     inner: snapshot,
                     materialized_files: None,
+                    load_metrics,
                 },
                 log_store,
             ))
