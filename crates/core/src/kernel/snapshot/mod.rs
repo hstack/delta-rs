@@ -59,6 +59,7 @@ pub(crate) use self::stats_projection::{
 pub use iterators::*;
 pub use scan::*;
 pub use stream::*;
+use crate::kernel::size_limits::SnapshotLoadMetrics;
 
 mod iterators;
 mod log_data;
@@ -207,6 +208,8 @@ pub struct Snapshot {
     pub(crate) config: DeltaTableConfig,
     /// Optional materialized replay state owned by this snapshot.
     pub(crate) materialized_files: Option<Arc<MaterializedFiles>>,
+    /// Metrics captured during snapshot loading
+    pub(crate) load_metrics: SnapshotLoadMetrics,
 }
 
 impl Snapshot {
@@ -250,6 +253,7 @@ impl Snapshot {
             inner: snapshot,
             config,
             materialized_files: None,
+            load_metrics,
         })
     }
 
@@ -319,10 +323,13 @@ impl Snapshot {
         .await
         .map_err(|e| DeltaTableError::Generic(e.to_string()))??;
 
+        let load_metrics = SnapshotLoadMetrics::from_snapshot(snapshot.as_ref());
+
         let snapshot = Arc::new(Self {
             inner: snapshot,
             config: self.config.clone(),
             materialized_files: None,
+            load_metrics,
         });
         if snapshot.version() as u64 == current_version {
             // `target_version` was `None`, but there were no new commits.
@@ -551,6 +558,11 @@ impl Snapshot {
             }
             Err(err) => Err(err),
         }
+    }
+
+    /// Get the metrics captured during snapshot loading
+    pub fn load_metrics(&self) -> &SnapshotLoadMetrics {
+        &self.load_metrics
     }
 
     /// Get the table root of the snapshot
@@ -918,6 +930,7 @@ impl Snapshot {
             inner: self.inner.clone(),
             config: self.config.clone(),
             materialized_files,
+            load_metrics: self.load_metrics.clone(),
         }
     }
 
@@ -1426,6 +1439,11 @@ impl EagerSnapshot {
         self.snapshot.load_config()
     }
 
+    /// Get the metrics captured during snapshot loading
+    pub fn load_metrics(&self) -> &SnapshotLoadMetrics {
+        &self.snapshot.load_metrics()
+    }
+
     /// Well known table configuration
     pub fn table_properties(&self) -> &TableProperties {
         self.snapshot.table_properties()
@@ -1618,11 +1636,13 @@ mod tests {
 
             let engine = log_store.engine(None);
             let snapshot = KernelSnapshot::builder_for(table_url.clone()).build(engine.as_ref())?;
+            let load_metrics = SnapshotLoadMetrics::from_snapshot(snapshot.as_ref());
             Ok((
                 Self {
                     inner: snapshot,
                     config: Default::default(),
                     materialized_files: None,
+                    load_metrics,
                 },
                 log_store,
             ))
