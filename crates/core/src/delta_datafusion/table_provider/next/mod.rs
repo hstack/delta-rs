@@ -44,10 +44,10 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 use uuid::Uuid;
 
-pub use self::scan::DeltaScanExec;
 pub(crate) use self::scan::KernelScanPlan;
 use self::scan::ProjectedScanContract;
 pub(crate) use self::scan::RuntimeFileFilter;
+pub use self::scan::{DeltaNextPhysicalCodec, DeltaScanExec};
 use super::data_sink::DeltaDataSink;
 use crate::DeltaTableError;
 use crate::delta_datafusion::DeltaScanConfig;

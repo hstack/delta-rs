@@ -16,7 +16,7 @@ use datafusion_proto::physical_plan::{AsExecutionPlan, ComposedPhysicalExtension
 use datafusion_proto::protobuf::PhysicalPlanNode;
 use prost::Message;
 use tracing::info;
-use deltalake_core::delta_datafusion::DeltaPhysicalCodec;
+use deltalake_core::delta_datafusion::{DeltaNextPhysicalCodec, DeltaPhysicalCodec};
 use deltalake_core::delta_datafusion::udtf::register_delta_table_udtf;
 
 /// DF 53 stores deep-projection state on `ParquetSource` as
@@ -182,5 +182,64 @@ async fn test_hstack_nullable_new() -> datafusion::common::Result<()> {
     let results1 = pretty::pretty_format_batches_with_options(&batches1, &FormatOptions::default())?.to_string();
     println!("{}", results1);
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_hstack_deep_column_pruning_next_codec() -> datafusion::common::Result<()> {
+    init_tracing();
+
+    let config =
+        SessionConfig::new().set_bool("datafusion.sql_parser.enable_ident_normalization", false);
+    let ctx = build_context(config);
+    register_delta_table_udtf(&ctx, None, None);
+
+    let delta_path = format!("{}/tests/data/deep", env!("CARGO_MANIFEST_DIR"));
+    let query = format!(
+        r#"
+        select t1._id, t1.productListItems['SKU'], _ACP_DATE
+        from delta_table_next('file://{}') as t1
+        "#,
+        delta_path
+    );
+    let plan = ctx.state().create_logical_plan(&query).await?;
+    let optimized_plan = ctx.state().optimize(&plan)?;
+    let state = ctx.state();
+    let query_planner = state.query_planner().clone();
+    let physical_plan = query_planner
+        .create_physical_plan(&optimized_plan, &state)
+        .await?;
+    let proj1 = extract_projection_deep_from_plan(physical_plan.clone());
+    assert!(
+        proj1.iter().any(|(_, indices)| !indices.is_empty()),
+        "Expected non-empty deep projection hints"
+    );
+    let batches1 = collect(physical_plan.clone(), ctx.state().task_ctx()).await?;
+    let results1 =
+        pretty::pretty_format_batches_with_options(&batches1, &FormatOptions::default())?
+            .to_string();
+
+    let codec = ComposedPhysicalExtensionCodec::new(vec![
+        Arc::new(DefaultPhysicalExtensionCodec {}),
+        Arc::new(DeltaNextPhysicalCodec {}),
+    ]);
+    let proto = PhysicalPlanNode::try_from_physical_plan(physical_plan.clone(), &codec)?;
+    let bytes = proto.encode_to_vec();
+    let plan_after_serde =
+        PhysicalPlanNode::try_decode(&bytes)?.try_into_physical_plan(&ctx.task_ctx(), &codec)?;
+    let proj2 = extract_projection_deep_from_plan(plan_after_serde.clone());
+    let batches2 = collect(plan_after_serde, ctx.state().task_ctx()).await?;
+    let results2 =
+        pretty::pretty_format_batches_with_options(&batches2, &FormatOptions::default())?
+            .to_string();
+
+    assert_eq!(
+        results1, results2,
+        "Batches should match after serialization"
+    );
+    assert_eq!(
+        proj1, proj2,
+        "Deep projections should match after serialization"
+    );
     Ok(())
 }

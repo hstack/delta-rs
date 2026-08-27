@@ -47,6 +47,10 @@ use crate::kernel::{Scan, Snapshot};
 /// `TableProvider::scan` request so planning and execution do not rederive them independently.
 #[derive(Clone, Debug)]
 pub(crate) struct ProjectedScanContract {
+    pub(crate) table_schema: SchemaRef,
+    pub(crate) provider_schema: SchemaRef,
+    pub(crate) projection: Option<Vec<usize>>,
+    pub(crate) filters: Vec<Expr>,
     /// Logical data schema after removing temporary predicate only columns and internal metadata.
     pub(crate) result_schema: SchemaRef,
     /// Logical schema produced by the kernel scan before dropping filter-only columns.
@@ -202,6 +206,10 @@ impl ProjectedScanContract {
         };
 
         Ok(Self {
+            table_schema,
+            provider_schema,
+            projection: projection.cloned(),
+            filters: filters.to_vec(),
             result_schema,
             scan_schema,
             output_schema,
@@ -222,6 +230,8 @@ impl ProjectedScanContract {
 /// be pushed to kernel file skipping vs. Parquet readers.
 #[derive(Clone, Debug)]
 pub(crate) struct KernelScanPlan {
+    pub(crate) filters: Vec<Expr>,
+    pub(crate) skipping_predicate: Option<Vec<Expr>>,
     /// Wrapped kernel scan to produce logical file stream
     pub(crate) scan: Arc<Scan>,
     /// The snapshot that `scan` reads. An eager snapshot holds its file list in memory, so
@@ -281,7 +291,7 @@ impl KernelScanPlan {
 
         // if some dedicated file skipping predicate is supplied,
         // we do not push the scan filters into the kernel scan.
-        let scan_predicate = if let Some(sp) = skipping_predicate {
+        let scan_predicate = if let Some(sp) = skipping_predicate.clone() {
             let (scan_predicate, _) = process_filters(&sp, table_config, config)?;
             if scan_predicate.is_none() {
                 debug!(
@@ -319,6 +329,8 @@ impl KernelScanPlan {
         let parquet_predicate_schema =
             build_parquet_predicate_schema(&parquet_read_schema, &contract.file_id_field);
         Ok(Self {
+            filters: filters.to_vec(),
+            skipping_predicate,
             scan,
             snapshot: snapshot.clone(),
             contract,
@@ -1479,6 +1491,10 @@ mod tests {
     fn test_retained_row_index_field_ignores_incomplete_internal_contract() {
         let schema = Arc::new(Schema::empty());
         let contract = ProjectedScanContract {
+            table_schema: Arc::new(Schema::empty()),
+            provider_schema: Arc::new(Schema::empty()),
+            projection: None,
+            filters: vec![],
             result_schema: Arc::clone(&schema),
             scan_schema: Arc::clone(&schema),
             output_schema: schema,
