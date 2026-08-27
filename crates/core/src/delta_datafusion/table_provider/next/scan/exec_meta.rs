@@ -62,19 +62,19 @@ use crate::kernel::arrow::engine_ext::ExpressionEvaluatorExt;
 /// - No deletion vectors affect the results (or they are accounted for)
 #[derive(Clone, Debug)]
 pub(crate) struct DeltaScanMetaExec {
-    scan_plan: Arc<KernelScanPlan>,
+    pub(super) scan_plan: Arc<KernelScanPlan>,
     /// Execution plan yielding the raw data read from data files.
-    input: Vec<VecDeque<(String, usize)>>,
+    pub(super) input: Vec<VecDeque<(String, usize)>>,
     /// Transforms to be applied to data eminating from individual files
-    transforms: Arc<HashMap<String, ExpressionRef>>,
+    pub(super) transforms: Arc<HashMap<String, ExpressionRef>>,
     /// Deletion vectors for the table
-    selection_vectors: Arc<DashMap<String, Vec<bool>>>,
+    pub(super) selection_vectors: Arc<DashMap<String, Vec<bool>>>,
     /// Public file paths keyed by compact scan file id.
-    public_file_ids: Arc<super::PublicFileIdMap>,
+    pub(super) public_file_ids: Arc<super::PublicFileIdMap>,
     /// Execution metrics
     metrics: ExecutionPlanMetricsSet,
     /// Column name for the file id
-    file_id_field: Option<FieldRef>,
+    pub(super) file_id_field: Option<FieldRef>,
     /// plan properties
     properties: Arc<PlanProperties>,
 }
