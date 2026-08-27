@@ -112,21 +112,21 @@ pub(super) struct DeletionVectorEntry {
 /// 4. Result is cast to the projected scan contract's result schema
 #[derive(Clone, Debug)]
 pub struct DeltaScanExec {
-    scan_plan: Arc<KernelScanPlan>,
+    pub(crate) scan_plan: Arc<KernelScanPlan>,
     /// Execution plan yielding the raw data read from data files.
     input: Arc<dyn ExecutionPlan>,
     /// Transforms to be applied to data eminating from individual files
-    transforms: Arc<HashMap<String, ExpressionRef>>,
+    pub(crate) transforms: Arc<HashMap<String, ExpressionRef>>,
     /// The planner records deletion vector masks and physical file ownership here.
-    dv_state: DvExecutionState,
+    pub(super) dv_state: DvExecutionState,
     /// Public file paths keyed by compact scan file id.
-    public_file_ids: Arc<super::PublicFileIdMap>,
+    pub(crate) public_file_ids: Arc<super::PublicFileIdMap>,
     /// Execution metrics
     metrics: ExecutionPlanMetricsSet,
     /// File id column name carried by the input batches for per file correlation.
-    input_file_id_column: String,
+    pub(crate) input_file_id_column: String,
     /// User-visible file-id column name when projected in the output.
-    file_id_column: Option<String>,
+    pub(crate) file_id_column: Option<String>,
     /// plan properties
     properties: Arc<PlanProperties>,
     /// Aggregated partition column statistics

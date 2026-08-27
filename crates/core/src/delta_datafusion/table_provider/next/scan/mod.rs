@@ -75,9 +75,10 @@ use parquet::file::metadata::{PageIndexPolicy, ParquetMetaData};
 use tracing::debug;
 use url::Url;
 
+pub use self::codec::DeltaNextPhysicalCodec;
 pub use self::exec::DeltaScanExec;
 use self::exec::DvExecutionState;
-use self::exec_meta::DeltaScanMetaExec;
+pub(crate) use self::exec_meta::DeltaScanMetaExec;
 pub(crate) use self::plan::{KernelScanPlan, ProjectedScanContract, supports_filters_pushdown};
 use self::replay::{ScanFileContext, ScanFileStream};
 pub(crate) use self::runtime_filter::RuntimeFileFilter;
@@ -94,8 +95,10 @@ use crate::{
     kernel::LogicalFileView,
 };
 
+mod codec;
 mod exec;
 mod exec_meta;
+pub mod limit;
 mod plan;
 mod replay;
 mod runtime_filter;
