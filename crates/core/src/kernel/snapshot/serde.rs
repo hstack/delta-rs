@@ -14,6 +14,8 @@ use serde::de::{self, Deserializer, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize, ser::SerializeSeq};
 use url::Url;
 
+use crate::kernel::size_limits::SnapshotLoadMetrics;
+
 use super::{
     EagerSnapshot, MaterializedFiles, MaterializedFilesPolicy, MaterializedFilesScope, Snapshot,
     SnapshotIdentity,
@@ -470,10 +472,12 @@ impl<'de> Visitor<'de> for SnapshotVisitor {
 
         let snapshot =
             KernelSnapshot::new(log_segment, table_configuration).map_err(de::Error::custom)?;
+        let load_metrics = SnapshotLoadMetrics::from_snapshot(&snapshot);
 
         let snapshot = Snapshot {
             inner: Arc::new(snapshot),
             materialized_files: None,
+            load_metrics,
         };
         let materialized_files = materialized_files
             // Reject legacy caches without statistics because the current contract includes them.
