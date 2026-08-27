@@ -63,8 +63,9 @@ use object_store::{ObjectMeta, path::Path};
 use tracing::debug;
 use url::Url;
 
+pub use self::codec::DeltaNextPhysicalCodec;
 pub use self::exec::DeltaScanExec;
-use self::exec_meta::DeltaScanMetaExec;
+pub(crate) use self::exec_meta::DeltaScanMetaExec;
 use self::expr_adapter::{DeltaPhysicalExprAdapterFactory, relax_schema_nested_nullability};
 pub(crate) use self::plan::{KernelScanPlan, ProjectedScanContract, supports_filters_pushdown};
 use self::replay::{ScanFileContext, ScanFileStream};
@@ -85,6 +86,7 @@ mod exec_meta;
 mod expr_adapter;
 mod plan;
 mod replay;
+mod codec;
 
 type ScanMetadataStream = Pin<Box<dyn Stream<Item = Result<ScanMetadata, DeltaTableError>> + Send>>;
 type PublicFileIdMap = HashMap<String, String>;
