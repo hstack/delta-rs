@@ -154,7 +154,7 @@ impl DeltaScanConfigBuilder {
             wrap_partition_values: self.wrap_partition_values.unwrap_or(true),
             enable_parquet_pushdown: self.enable_parquet_pushdown,
             schema: self.schema.clone(),
-            schema_force_view_types: true,
+            schema_force_view_types: false,
         })
     }
 }
@@ -188,7 +188,7 @@ impl DeltaScanConfig {
             file_column_name: None,
             wrap_partition_values: true,
             enable_parquet_pushdown: true,
-            schema_force_view_types: true,
+            schema_force_view_types: false,
             schema: None,
         }
     }
@@ -389,6 +389,7 @@ impl TableProviderBuilder {
             .map_or_else(DeltaScanConfig::new, |session| {
                 DeltaScanConfig::new_from_session(session.as_ref())
             });
+        config.schema_force_view_types = false;
         if let Some(file_column) = file_column {
             config = config.with_file_column_name(file_column);
         }
