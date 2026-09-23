@@ -534,6 +534,7 @@ impl DeltaScanExecWire {
         }
 
         let mut delta_scan_config = DeltaScanConfig::new();
+        delta_scan_config.schema_force_view_types = false;
         if let Some(fic) = self.file_id_column {
             delta_scan_config = delta_scan_config.with_file_column_name(fic);
         }
@@ -662,6 +663,7 @@ impl DeltaScanMetaExecWire {
         }
 
         let mut delta_scan_config = DeltaScanConfig::new();
+        delta_scan_config.schema_force_view_types = false;
         if let Some(fic) = self.file_id_column {
             delta_scan_config = delta_scan_config.with_file_column_name(fic);
         }
