@@ -11,7 +11,7 @@ use datafusion::execution::{SendableRecordBatchStream, TaskContext};
 use datafusion::logical_expr::simplify::SimplifyContext;
 use datafusion::optimizer::simplify_expressions::ExprSimplifier;
 use datafusion::physical_plan::filter_pushdown::{FilterDescription, FilterPushdownPhase};
-use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricBuilder, MetricsSet};
+use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, PhysicalExpr, PlanProperties,
 };
@@ -22,7 +22,9 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::delta_datafusion::table_provider::next::SnapshotWrapper;
-use crate::delta_datafusion::{DataFusionMixins as _, FindFilesExprProperties};
+use crate::delta_datafusion::{
+    DataFusionMixins as _, FindFilesExprProperties, metric_wire::MetricsSetWire,
+};
 use crate::kernel::{Add, EagerSnapshot, Snapshot, Version};
 use crate::logstore::{LogStore, LogStoreExt as _};
 use crate::table::normalize_table_url;
@@ -561,45 +563,35 @@ pub(super) struct DeltaScanWire {
     pub(crate) config: DeltaScanConfig,
     pub(crate) logical_schema: Arc<Schema>,
     #[serde(default)]
-    pub(crate) files_scanned: usize,
-    #[serde(default)]
-    pub(crate) files_pruned: usize,
+    pub(crate) metrics: MetricsSetWire,
 }
 
-impl From<&DeltaScan> for DeltaScanWire {
-    fn from(scan: &DeltaScan) -> Self {
-        let metrics = scan.metrics.clone_inner();
-        Self {
+impl TryFrom<&DeltaScan> for DeltaScanWire {
+    type Error = DataFusionError;
+
+    fn try_from(scan: &DeltaScan) -> Result<Self, Self::Error> {
+        Ok(Self {
             table_url: scan.table_url.clone(),
             config: scan.config.clone(),
             logical_schema: scan.logical_schema.clone(),
-            files_scanned: metrics
-                .sum_by_name("files_scanned")
-                .map(|value| value.as_usize())
-                .unwrap_or_default(),
-            files_pruned: metrics
-                .sum_by_name("files_pruned")
-                .map(|value| value.as_usize())
-                .unwrap_or_default(),
-        }
+            metrics: MetricsSetWire::try_from(&scan.metrics.clone_inner())?,
+        })
     }
 }
 
 impl DeltaScanWire {
-    pub(super) fn into_delta_scan(self, parquet_scan: Arc<dyn ExecutionPlan>) -> DeltaScan {
-        let scan = DeltaScan::new(
+    pub(super) fn into_delta_scan(
+        self,
+        parquet_scan: Arc<dyn ExecutionPlan>,
+    ) -> Result<DeltaScan, DataFusionError> {
+        let mut scan = DeltaScan::new(
             &self.table_url,
             self.config,
             parquet_scan,
             self.logical_schema,
         );
-        MetricBuilder::new(&scan.metrics)
-            .global_counter("files_scanned")
-            .add(self.files_scanned);
-        MetricBuilder::new(&scan.metrics)
-            .global_counter("files_pruned")
-            .add(self.files_pruned);
-        scan
+        scan.metrics = self.metrics.try_into()?;
+        Ok(scan)
     }
 }
 
@@ -725,6 +717,7 @@ mod tests {
     use datafusion::logical_expr::dml::InsertOp;
     use datafusion::physical_plan::collect_partitioned;
     use datafusion::physical_plan::empty::EmptyExec;
+    use datafusion::physical_plan::metrics::MetricBuilder;
     use std::sync::Arc;
     use url::Url;
 
@@ -790,9 +783,11 @@ mod tests {
             .global_counter("files_pruned")
             .add(3);
 
-        let encoded = serde_json::to_vec(&DeltaScanWire::from(&scan)).unwrap();
+        let encoded = serde_json::to_vec(&DeltaScanWire::try_from(&scan).unwrap()).unwrap();
         let wire: DeltaScanWire = serde_json::from_slice(&encoded).unwrap();
-        let decoded = wire.into_delta_scan(Arc::new(EmptyExec::new(schema)));
+        let decoded = wire
+            .into_delta_scan(Arc::new(EmptyExec::new(schema)))
+            .unwrap();
         let metrics = decoded.metrics().expect("decoded metrics");
 
         assert_eq!(

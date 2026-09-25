@@ -12,6 +12,7 @@ use super::{DeltaScanExec, DeltaScanMetaExec, ProjectedScanContract, PublicFileI
 use crate::DeltaTableConfig;
 use crate::delta_datafusion::DeltaScanConfig;
 use crate::delta_datafusion::engine::{to_datafusion_expr, to_delta_expression};
+use crate::delta_datafusion::metric_wire::MetricsSetWire;
 use crate::kernel::Snapshot;
 use crate::kernel::size_limits::SnapshotLoadMetrics;
 use arrow::datatypes::SchemaRef;
@@ -20,7 +21,6 @@ use datafusion::common::HashMap;
 use datafusion::error::DataFusionError;
 use datafusion::execution::TaskContext;
 use datafusion::physical_plan::ExecutionPlan;
-use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricBuilder};
 use datafusion::prelude::Expr;
 use datafusion_datasource::file_scan_config::{FileScanConfig, FileScanConfigBuilder};
 use datafusion_datasource::source::DataSourceExec;
@@ -124,9 +124,7 @@ pub(crate) struct DeltaScanExecWire {
     file_id_column: Option<String>,
     public_file_ids: std::collections::HashMap<String, String>,
     #[serde(default)]
-    count_files_scanned: usize,
-    #[serde(default)]
-    count_files_pruned_by_limit: usize,
+    metrics: MetricsSetWire,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -214,7 +212,9 @@ impl TryFrom<&DeltaScanExec> for DeltaScanExecWire {
 
     fn try_from(exec: &DeltaScanExec) -> Result<Self, Self::Error> {
         let scan_plan_wire = scan_plan_wire(&exec.scan_plan)?;
-        let metrics = exec.metrics().unwrap_or_default();
+        let metrics = exec.metrics().ok_or_else(|| {
+            DataFusionError::Internal("DeltaScanExec did not expose its metrics".to_string())
+        })?;
 
         let transforms = serialize_transforms(&exec.transforms)?;
 
@@ -238,14 +238,7 @@ impl TryFrom<&DeltaScanExec> for DeltaScanExecWire {
             input_file_id_column: exec.input_file_id_column.clone(),
             file_id_column: exec.file_id_column.clone(),
             public_file_ids,
-            count_files_scanned: metrics
-                .sum_by_name("count_files_scanned")
-                .map(|value| value.as_usize())
-                .unwrap_or_default(),
-            count_files_pruned_by_limit: metrics
-                .sum_by_name("count_files_pruned_by_limit")
-                .map(|value| value.as_usize())
-                .unwrap_or_default(),
+            metrics: MetricsSetWire::try_from(&metrics)?,
         })
     }
 }
@@ -500,13 +493,7 @@ impl DeltaScanExecWire {
             }
         }
 
-        let metrics = ExecutionPlanMetricsSet::new();
-        MetricBuilder::new(&metrics)
-            .global_counter("count_files_scanned")
-            .add(self.count_files_scanned);
-        MetricBuilder::new(&metrics)
-            .global_counter("count_files_pruned_by_limit")
-            .add(self.count_files_pruned_by_limit);
+        let metrics = self.metrics.try_into()?;
 
         let exec = DeltaScanExec::new(
             Arc::new(scan_plan),
@@ -534,6 +521,8 @@ pub(crate) struct DeltaScanMetaExecWire {
     selection_vectors: std::collections::HashMap<String, Vec<bool>>,
     file_id_column: Option<String>,
     public_file_ids: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    metrics: MetricsSetWire,
 }
 
 impl TryFrom<&DeltaScanMetaExec> for DeltaScanMetaExecWire {
@@ -541,6 +530,9 @@ impl TryFrom<&DeltaScanMetaExec> for DeltaScanMetaExecWire {
 
     fn try_from(exec: &DeltaScanMetaExec) -> Result<Self, Self::Error> {
         let scan_plan_wire = scan_plan_wire(&exec.scan_plan)?;
+        let metrics = exec.metrics().ok_or_else(|| {
+            DataFusionError::Internal("DeltaScanMetaExec did not expose its metrics".to_string())
+        })?;
 
         let transforms = serialize_transforms(&exec.transforms)?;
 
@@ -564,6 +556,7 @@ impl TryFrom<&DeltaScanMetaExec> for DeltaScanMetaExecWire {
             selection_vectors,
             file_id_column: exec.file_id_field.as_ref().map(|f| f.name().clone()),
             public_file_ids,
+            metrics: MetricsSetWire::try_from(&metrics)?,
         })
     }
 }
@@ -649,7 +642,7 @@ impl DeltaScanMetaExecWire {
             Arc::new(selection_vectors),
             Arc::new(public_file_ids),
             file_id_field,
-            ExecutionPlanMetricsSet::new(),
+            self.metrics.try_into()?,
         );
 
         Ok(Arc::new(exec))
@@ -1332,6 +1325,17 @@ mod tests {
             decoded_meta.partition_statistics(None)?.num_rows,
             "Exact row counts should match"
         );
+        for metric_name in ["count_files_scanned", "count_files_pruned_by_limit"] {
+            assert_eq!(
+                meta_scan
+                    .metrics()
+                    .and_then(|metrics| metrics.sum_by_name(metric_name)),
+                decoded_meta
+                    .metrics()
+                    .and_then(|metrics| metrics.sum_by_name(metric_name)),
+                "{metric_name} should survive the metadata codec roundtrip"
+            );
+        }
 
         Ok(())
     }
