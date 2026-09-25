@@ -22,7 +22,9 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::delta_datafusion::table_provider::next::SnapshotWrapper;
-use crate::delta_datafusion::{DataFusionMixins as _, FindFilesExprProperties};
+use crate::delta_datafusion::{
+    DataFusionMixins as _, FindFilesExprProperties, metric_wire::MetricsSetWire,
+};
 use crate::kernel::{Add, EagerSnapshot, Snapshot, Version};
 use crate::logstore::{LogStore, LogStoreExt as _};
 use crate::table::normalize_table_url;
@@ -560,26 +562,36 @@ pub(super) struct DeltaScanWire {
     pub(crate) table_url: Url,
     pub(crate) config: DeltaScanConfig,
     pub(crate) logical_schema: Arc<Schema>,
+    #[serde(default)]
+    pub(crate) metrics: MetricsSetWire,
 }
 
-impl From<&DeltaScan> for DeltaScanWire {
-    fn from(scan: &DeltaScan) -> Self {
-        Self {
+impl TryFrom<&DeltaScan> for DeltaScanWire {
+    type Error = DataFusionError;
+
+    fn try_from(scan: &DeltaScan) -> Result<Self, Self::Error> {
+        Ok(Self {
             table_url: scan.table_url.clone(),
             config: scan.config.clone(),
             logical_schema: scan.logical_schema.clone(),
-        }
+            metrics: MetricsSetWire::try_from(&scan.metrics.clone_inner())?,
+        })
     }
 }
 
 impl DeltaScanWire {
-    pub(super) fn into_delta_scan(self, parquet_scan: Arc<dyn ExecutionPlan>) -> DeltaScan {
-        DeltaScan::new(
+    pub(super) fn into_delta_scan(
+        self,
+        parquet_scan: Arc<dyn ExecutionPlan>,
+    ) -> Result<DeltaScan, DataFusionError> {
+        let mut scan = DeltaScan::new(
             &self.table_url,
             self.config,
             parquet_scan,
             self.logical_schema,
-        )
+        );
+        scan.metrics = self.metrics.try_into()?;
+        Ok(scan)
     }
 }
 
@@ -704,6 +716,8 @@ mod tests {
     use datafusion::execution::context::SessionState;
     use datafusion::logical_expr::dml::InsertOp;
     use datafusion::physical_plan::collect_partitioned;
+    use datafusion::physical_plan::empty::EmptyExec;
+    use datafusion::physical_plan::metrics::MetricBuilder;
     use std::sync::Arc;
     use url::Url;
 
@@ -751,6 +765,45 @@ mod tests {
         use datafusion::prelude::SessionConfig;
         let config = SessionConfig::new();
         Arc::new(SessionStateBuilder::new().with_config(config).build())
+    }
+
+    #[test]
+    fn delta_scan_wire_preserves_planning_metrics() {
+        let schema = Arc::new(Schema::empty());
+        let scan = DeltaScan::new(
+            &Url::parse("file:///tmp/delta").unwrap(),
+            DeltaScanConfig::default(),
+            Arc::new(EmptyExec::new(schema.clone())),
+            schema.clone(),
+        );
+        MetricBuilder::new(&scan.metrics)
+            .global_counter("files_scanned")
+            .add(4);
+        MetricBuilder::new(&scan.metrics)
+            .global_counter("files_pruned")
+            .add(3);
+
+        let encoded = serde_json::to_vec(&DeltaScanWire::try_from(&scan).unwrap()).unwrap();
+        let wire: DeltaScanWire = serde_json::from_slice(&encoded).unwrap();
+        let decoded = wire
+            .into_delta_scan(Arc::new(EmptyExec::new(schema)))
+            .unwrap();
+        let metrics = decoded.metrics().expect("decoded metrics");
+
+        assert_eq!(
+            metrics
+                .sum_by_name("files_scanned")
+                .expect("files_scanned")
+                .as_usize(),
+            4
+        );
+        assert_eq!(
+            metrics
+                .sum_by_name("files_pruned")
+                .expect("files_pruned")
+                .as_usize(),
+            3
+        );
     }
 
     #[test]
