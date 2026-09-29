@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 use uuid::Uuid;
 
+use crate::delta_datafusion::planning_count_metrics::PlanningCountMetricsWire;
 use crate::delta_datafusion::table_provider::next::SnapshotWrapper;
 use crate::delta_datafusion::{DataFusionMixins as _, FindFilesExprProperties};
 use crate::kernel::{Add, EagerSnapshot, Snapshot, Version};
@@ -560,6 +561,8 @@ pub(super) struct DeltaScanWire {
     pub(crate) table_url: Url,
     pub(crate) config: DeltaScanConfig,
     pub(crate) logical_schema: Arc<Schema>,
+    #[serde(default, skip_serializing_if = "PlanningCountMetricsWire::is_empty")]
+    pub(crate) planning_count_metrics: PlanningCountMetricsWire,
 }
 
 impl From<&DeltaScan> for DeltaScanWire {
@@ -568,18 +571,21 @@ impl From<&DeltaScan> for DeltaScanWire {
             table_url: scan.table_url.clone(),
             config: scan.config.clone(),
             logical_schema: scan.logical_schema.clone(),
+            planning_count_metrics: PlanningCountMetricsWire::from(&scan.metrics.clone_inner()),
         }
     }
 }
 
 impl DeltaScanWire {
     pub(super) fn into_delta_scan(self, parquet_scan: Arc<dyn ExecutionPlan>) -> DeltaScan {
-        DeltaScan::new(
+        let mut scan = DeltaScan::new(
             &self.table_url,
             self.config,
             parquet_scan,
             self.logical_schema,
-        )
+        );
+        scan.metrics = self.planning_count_metrics.into();
+        scan
     }
 }
 

@@ -12,6 +12,7 @@ use super::{DeltaScanExec, DeltaScanMetaExec, ProjectedScanContract, PublicFileI
 use crate::DeltaTableConfig;
 use crate::delta_datafusion::DeltaScanConfig;
 use crate::delta_datafusion::engine::{to_datafusion_expr, to_delta_expression};
+use crate::delta_datafusion::planning_count_metrics::PlanningCountMetricsWire;
 use crate::kernel::Snapshot;
 use crate::kernel::size_limits::SnapshotLoadMetrics;
 use arrow::datatypes::SchemaRef;
@@ -123,6 +124,8 @@ pub(crate) struct DeltaScanExecWire {
     input_file_id_column: String,
     file_id_column: Option<String>,
     public_file_ids: std::collections::HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "PlanningCountMetricsWire::is_empty")]
+    planning_count_metrics: PlanningCountMetricsWire,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -210,6 +213,9 @@ impl TryFrom<&DeltaScanExec> for DeltaScanExecWire {
 
     fn try_from(exec: &DeltaScanExec) -> Result<Self, Self::Error> {
         let scan_plan_wire = scan_plan_wire(&exec.scan_plan)?;
+        let metrics = exec.metrics().ok_or_else(|| {
+            DataFusionError::Internal("DeltaScanExec did not expose its metrics".to_string())
+        })?;
 
         let transforms = serialize_transforms(&exec.transforms)?;
 
@@ -233,6 +239,7 @@ impl TryFrom<&DeltaScanExec> for DeltaScanExecWire {
             input_file_id_column: exec.input_file_id_column.clone(),
             file_id_column: exec.file_id_column.clone(),
             public_file_ids,
+            planning_count_metrics: PlanningCountMetricsWire::from(&metrics),
         })
     }
 }
@@ -487,6 +494,8 @@ impl DeltaScanExecWire {
             }
         }
 
+        let metrics = self.planning_count_metrics.into();
+
         let exec = DeltaScanExec::new(
             Arc::new(scan_plan),
             execution_plan,
@@ -494,7 +503,7 @@ impl DeltaScanExecWire {
             Arc::new(selection_vectors),
             Arc::new(public_file_ids),
             Default::default(),
-            Default::default(),
+            metrics,
         );
 
         Ok(Arc::new(exec))
