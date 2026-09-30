@@ -1,4 +1,9 @@
-//! Serializable planning count metrics attached to Delta scan plans.
+//! Codec for planning-time count metrics attached to Delta scan plans.
+//!
+//! Only [`MetricValue::Count`] metrics are serialized. Runtime metrics are collected by the
+//! execution plan on the worker and are not copied from the coordinator.
+// TODO: Move this codec into `table_provider::next::scan::codec` after removing the legacy table
+// provider.
 
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -9,8 +14,8 @@ use datafusion::physical_plan::metrics::{
 use serde::{Deserialize, Serialize};
 
 // Consumed by datafusion-distributed's MetricsWrapperExec before task aggregation.
-const DFD_AGGREGATION_SCOPE_LABEL: &str = "dfd_aggregation_scope";
-const COORDINATOR_AGGREGATION_SCOPE: &str = "coordinator";
+const DFD_CREATED_AT_LABEL: &str = "created_at";
+const CREATED_AT_PLANNING: &str = "planning";
 
 #[derive(Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -52,10 +57,7 @@ impl From<PlanningCountMetricsWire> for ExecutionPlanMetricsSet {
                         count,
                     },
                     None,
-                    vec![Label::new(
-                        DFD_AGGREGATION_SCOPE_LABEL,
-                        COORDINATOR_AGGREGATION_SCOPE,
-                    )],
+                    vec![Label::new(DFD_CREATED_AT_LABEL, CREATED_AT_PLANNING)],
                 ))
             })
             .collect::<MetricsSet>()
@@ -117,8 +119,8 @@ mod tests {
             let labels = metric.labels();
             metric.partition().is_none()
                 && labels.len() == 1
-                && labels[0].name() == DFD_AGGREGATION_SCOPE_LABEL
-                && labels[0].value() == COORDINATOR_AGGREGATION_SCOPE
+                && labels[0].name() == DFD_CREATED_AT_LABEL
+                && labels[0].value() == CREATED_AT_PLANNING
                 && metric.metric_type() == MetricType::Dev
                 && metric.metric_category().is_none()
         }));

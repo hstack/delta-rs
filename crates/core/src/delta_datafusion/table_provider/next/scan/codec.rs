@@ -12,7 +12,7 @@ use super::{DeltaScanExec, DeltaScanMetaExec, ProjectedScanContract, PublicFileI
 use crate::DeltaTableConfig;
 use crate::delta_datafusion::DeltaScanConfig;
 use crate::delta_datafusion::engine::{to_datafusion_expr, to_delta_expression};
-use crate::delta_datafusion::planning_count_metrics::PlanningCountMetricsWire;
+use crate::delta_datafusion::planning_count_metrics_codec::PlanningCountMetricsWire;
 use crate::kernel::Snapshot;
 use crate::kernel::size_limits::SnapshotLoadMetrics;
 use arrow::datatypes::SchemaRef;
@@ -213,9 +213,7 @@ impl TryFrom<&DeltaScanExec> for DeltaScanExecWire {
 
     fn try_from(exec: &DeltaScanExec) -> Result<Self, Self::Error> {
         let scan_plan_wire = scan_plan_wire(&exec.scan_plan)?;
-        let metrics = exec.metrics().ok_or_else(|| {
-            DataFusionError::Internal("DeltaScanExec did not expose its metrics".to_string())
-        })?;
+        let metrics = exec.metrics().unwrap_or_default();
 
         let transforms = serialize_transforms(&exec.transforms)?;
 

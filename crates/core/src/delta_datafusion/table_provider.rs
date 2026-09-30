@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 use uuid::Uuid;
 
-use crate::delta_datafusion::planning_count_metrics::PlanningCountMetricsWire;
+use crate::delta_datafusion::planning_count_metrics_codec::PlanningCountMetricsWire;
 use crate::delta_datafusion::table_provider::next::SnapshotWrapper;
 use crate::delta_datafusion::{DataFusionMixins as _, FindFilesExprProperties};
 use crate::kernel::{Add, EagerSnapshot, Snapshot, Version};
