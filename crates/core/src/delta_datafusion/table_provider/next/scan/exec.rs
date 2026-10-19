@@ -38,6 +38,8 @@ use futures::stream::{Stream, StreamExt};
 use super::expr_adapter::DeltaPhysicalExprAdapterFactory;
 use super::plan::KernelScanPlan;
 use crate::delta_datafusion::file_id::file_id_field;
+use crate::delta_datafusion::schema_null::rewrite_schema_with_nullable_fields;
+use delta_kernel::engine::arrow_conversion::{TryIntoArrow as _, TryIntoKernel as _};
 use crate::kernel::ARROW_HANDLER;
 use crate::kernel::arrow::engine_ext::ExpressionEvaluatorExt;
 
@@ -355,9 +357,15 @@ impl ExecutionPlan for DeltaScanExec {
             }
         }
 
+        // Kernel transforms rebuild batches against this type, so it needs the same
+        // nullable-field overrides as the parquet read schema.
+        let logical_schema: Schema = self.scan_plan.scan.logical_schema().as_ref().try_into_arrow()?;
+        let logical_schema = rewrite_schema_with_nullable_fields(Arc::new(logical_schema));
+        let kernel_type = KernelDataType::Struct(Box::new(logical_schema.as_ref().try_into_kernel()?));
+
         Ok(Box::pin(DeltaScanStream {
             scan_plan: Arc::clone(&self.scan_plan),
-            kernel_type: Arc::clone(self.scan_plan.scan.logical_schema()).into(),
+            kernel_type,
             input: self.input.execute(partition, context)?,
             baseline_metrics: BaselineMetrics::new(&self.metrics, partition),
             transforms: Arc::clone(&self.transforms),
