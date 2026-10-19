@@ -1,7 +1,7 @@
 //! Codec for planning-time count metrics attached to Delta scan plans.
 //!
 //! Only [`MetricValue::Count`] metrics are serialized. Runtime metrics are collected by the
-//! execution plan on the worker and are not copied from the coordinator.
+//! execution plan wherever it runs and are never copied from the encoded plan.
 // TODO: Move this codec into `table_provider::next::scan::codec` after removing the legacy table
 // provider.
 
@@ -9,13 +9,32 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 use datafusion::physical_plan::metrics::{
-    Count, ExecutionPlanMetricsSet, Label, Metric, MetricValue, MetricsSet,
+    Count, ExecutionPlanMetricsSet, Metric, MetricValue, MetricsSet,
 };
 use serde::{Deserialize, Serialize};
 
-// Consumed by datafusion-distributed's MetricsWrapperExec before task aggregation.
-const CREATED_AT_LABEL: &str = "created_at";
-const CREATED_AT_PLANNING: &str = "planning";
+/// Serialization options shared by the Delta physical codecs
+/// ([`DeltaNextPhysicalCodec`](super::DeltaNextPhysicalCodec) and the legacy
+/// `DeltaPhysicalCodec`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeltaPhysicalCodecConfig {
+    /// Write planning-time scan count metrics (for example the number of scanned or pruned
+    /// files) with an encoded scan, and restore them when decoding. Enabled by default.
+    ///
+    /// Disable it for plans shipped to execution-only workers, such as distributed tasks whose
+    /// runtime metrics are merged back into the coordinator's plan: the coordinator already owns
+    /// the planning metrics, so a copy in every task would be counted once per task. When
+    /// disabled, planning metrics are neither written nor restored from a received plan.
+    pub serialize_planning_metrics: bool,
+}
+
+impl Default for DeltaPhysicalCodecConfig {
+    fn default() -> Self {
+        Self {
+            serialize_planning_metrics: true,
+        }
+    }
+}
 
 #[derive(Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -24,6 +43,24 @@ pub(super) struct PlanningCountMetricsWire(Vec<PlanningCountMetricWire>);
 impl PlanningCountMetricsWire {
     pub(super) fn is_empty(&self) -> bool {
         self.0.is_empty()
+    }
+
+    /// Wire form of a scan's planning metrics; empty when `config` disables them.
+    pub(super) fn encode(metrics: &MetricsSet, config: DeltaPhysicalCodecConfig) -> Self {
+        if config.serialize_planning_metrics {
+            Self::from(metrics)
+        } else {
+            Self::default()
+        }
+    }
+
+    /// Metrics for a decoded scan; empty when `config` disables planning metrics.
+    pub(super) fn decode(self, config: DeltaPhysicalCodecConfig) -> ExecutionPlanMetricsSet {
+        if config.serialize_planning_metrics {
+            self.into()
+        } else {
+            ExecutionPlanMetricsSet::new()
+        }
     }
 }
 
@@ -51,13 +88,12 @@ impl From<PlanningCountMetricsWire> for ExecutionPlanMetricsSet {
             .map(|metric| {
                 let count = Count::new();
                 count.add(metric.value);
-                Arc::new(Metric::new_with_labels(
+                Arc::new(Metric::new(
                     MetricValue::Count {
                         name: Cow::Owned(metric.name),
                         count,
                     },
                     None,
-                    vec![Label::new(CREATED_AT_LABEL, CREATED_AT_PLANNING)],
                 ))
             })
             .collect::<MetricsSet>()
@@ -83,9 +119,8 @@ mod tests {
         count
     }
 
-    #[test]
-    fn planning_count_metrics_wire_roundtrips_named_counts_only() {
-        let metrics = vec![
+    fn planning_metrics() -> MetricsSet {
+        vec![
             Arc::new(Metric::new_with_labels(
                 MetricValue::Count {
                     name: Cow::Borrowed("files_scanned"),
@@ -104,25 +139,43 @@ mod tests {
             Arc::new(Metric::new(MetricValue::OutputRows(count(80)), None)),
         ]
         .into_iter()
-        .collect::<MetricsSet>();
+        .collect()
+    }
 
-        let wire = PlanningCountMetricsWire::from(&metrics);
+    const DISABLED: DeltaPhysicalCodecConfig = DeltaPhysicalCodecConfig {
+        serialize_planning_metrics: false,
+    };
+
+    #[test]
+    fn planning_count_metrics_wire_roundtrips_named_counts_only() {
+        let config = DeltaPhysicalCodecConfig::default();
+        let wire = PlanningCountMetricsWire::encode(&planning_metrics(), config);
         let encoded = serde_json::to_vec(&wire).unwrap();
         let decoded: PlanningCountMetricsWire = serde_json::from_slice(&encoded).unwrap();
         assert_eq!(decoded, wire);
 
-        let decoded = ExecutionPlanMetricsSet::from(decoded).clone_inner();
+        let decoded = decoded.decode(config).clone_inner();
         assert_eq!(decoded.iter().count(), 2);
         assert_eq!(decoded.sum_by_name("files_scanned").unwrap().as_usize(), 4);
         assert_eq!(decoded.sum_by_name("files_pruned").unwrap().as_usize(), 2);
         assert!(decoded.iter().all(|metric| {
-            let labels = metric.labels();
             metric.partition().is_none()
-                && labels.len() == 1
-                && labels[0].name() == CREATED_AT_LABEL
-                && labels[0].value() == CREATED_AT_PLANNING
+                && metric.labels().is_empty()
                 && metric.metric_type() == MetricType::Dev
                 && metric.metric_category().is_none()
         }));
+    }
+
+    #[test]
+    fn disabled_planning_metrics_are_neither_written_nor_restored() {
+        assert!(PlanningCountMetricsWire::encode(&planning_metrics(), DISABLED).is_empty());
+
+        // A plan encoded with planning metrics still decodes without them when disabled.
+        let wire = PlanningCountMetricsWire::encode(
+            &planning_metrics(),
+            DeltaPhysicalCodecConfig::default(),
+        );
+        assert!(!wire.is_empty());
+        assert_eq!(wire.decode(DISABLED).clone_inner().iter().count(), 0);
     }
 }
