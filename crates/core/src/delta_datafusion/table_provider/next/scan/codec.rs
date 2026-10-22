@@ -14,6 +14,9 @@ use super::{
 };
 use crate::delta_datafusion::DeltaScanConfig;
 use crate::delta_datafusion::engine::{to_datafusion_expr, to_delta_expression};
+use crate::delta_datafusion::planning_count_metrics_codec::{
+    DeltaPhysicalCodecConfig, PlanningCountMetricsWire,
+};
 use crate::kernel::Snapshot;
 use arrow::datatypes::SchemaRef;
 use dashmap::DashMap;
@@ -44,7 +47,16 @@ use serde::{Deserialize, Serialize};
 /// Full-plan protobuf round-trips of deletion-vector scans require Parquet virtual-column
 /// support in DataFusion's serializer. DataFusion 55 does not preserve those columns.
 #[derive(Debug, Clone, Default)]
-pub struct DeltaNextPhysicalCodec;
+pub struct DeltaNextPhysicalCodec {
+    config: DeltaPhysicalCodecConfig,
+}
+
+impl DeltaNextPhysicalCodec {
+    /// Creates a codec with the given serialization options.
+    pub fn new(config: DeltaPhysicalCodecConfig) -> Self {
+        Self { config }
+    }
+}
 
 impl PhysicalExtensionCodec for DeltaNextPhysicalCodec {
     fn try_decode(
@@ -59,7 +71,7 @@ impl PhysicalExtensionCodec for DeltaNextPhysicalCodec {
         })?;
 
         match wire {
-            ScanExecWire::Scan(wire) => wire.into_exec(inputs, ctx),
+            ScanExecWire::Scan(wire) => wire.into_exec(inputs, ctx, self.config),
             ScanExecWire::Meta(wire) => wire.into_exec(inputs, ctx),
         }
     }
@@ -71,7 +83,7 @@ impl PhysicalExtensionCodec for DeltaNextPhysicalCodec {
         _converter: &dyn PhysicalProtoConverterExtension,
     ) -> datafusion::common::Result<()> {
         let wire = if let Some(delta_scan) = node.downcast_ref::<DeltaScanExec>() {
-            ScanExecWire::Scan(DeltaScanExecWire::try_from(delta_scan)?)
+            ScanExecWire::Scan(DeltaScanExecWire::try_new(delta_scan, self.config)?)
         } else if let Some(meta_scan) = node.downcast_ref::<DeltaScanMetaExec>() {
             ScanExecWire::Meta(DeltaScanMetaExecWire::try_from(meta_scan)?)
         } else {
@@ -131,6 +143,8 @@ pub(crate) struct DeltaScanExecWire {
     input_file_id_column: String,
     file_id_column: Option<String>,
     public_file_ids: std::collections::HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "PlanningCountMetricsWire::is_empty")]
+    planning_count_metrics: PlanningCountMetricsWire,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -311,11 +325,13 @@ fn scan_plan_wire(scan_plan: &KernelScanPlan) -> Result<ScanPlanWire, DataFusion
     })
 }
 
-impl TryFrom<&DeltaScanExec> for DeltaScanExecWire {
-    type Error = DataFusionError;
-
-    fn try_from(exec: &DeltaScanExec) -> Result<Self, Self::Error> {
+impl DeltaScanExecWire {
+    fn try_new(
+        exec: &DeltaScanExec,
+        codec_config: DeltaPhysicalCodecConfig,
+    ) -> Result<Self, DataFusionError> {
         let scan_plan_wire = scan_plan_wire(&exec.scan_plan)?;
+        let metrics = exec.metrics().unwrap_or_default();
 
         let transforms = serialize_transforms(&exec.transforms)?;
 
@@ -335,6 +351,7 @@ impl TryFrom<&DeltaScanExec> for DeltaScanExecWire {
             input_file_id_column: exec.input_file_id_column.clone(),
             file_id_column: exec.file_id_column.clone(),
             public_file_ids,
+            planning_count_metrics: PlanningCountMetricsWire::encode(&metrics, codec_config),
         })
     }
 }
@@ -509,6 +526,7 @@ impl DeltaScanExecWire {
         self,
         inputs: &[Arc<dyn ExecutionPlan>],
         task: &TaskContext,
+        codec_config: DeltaPhysicalCodecConfig,
     ) -> datafusion::common::Result<Arc<dyn ExecutionPlan>> {
         if inputs.len() != 1 {
             return Err(DataFusionError::Internal(format!(
@@ -588,6 +606,8 @@ impl DeltaScanExecWire {
             }
         }
 
+        let metrics = self.planning_count_metrics.decode(codec_config);
+
         let exec = DeltaScanExec::new(
             Arc::new(scan_plan),
             execution_plan,
@@ -595,7 +615,7 @@ impl DeltaScanExecWire {
             dv_state,
             Arc::new(public_file_ids),
             Default::default(),
-            Default::default(),
+            metrics,
         );
 
         Ok(Arc::new(exec))
@@ -902,7 +922,7 @@ mod tests {
         ];
         let session = create_session().into_inner();
         let task = session.task_ctx();
-        let codec = DeltaNextPhysicalCodec;
+        let codec = DeltaNextPhysicalCodec::default();
         let transforms: HashMap<_, _> = [
             ("a".to_string(), test_transform(1, false)),
             ("b".to_string(), test_transform(1, true)),
@@ -914,7 +934,7 @@ mod tests {
         for plan in plans {
             let (mut wire, tag) = if let Some(scan) = extract_delta_scan_exec(&plan) {
                 (
-                    ScanExecWire::Scan(DeltaScanExecWire::try_from(scan)?),
+                    ScanExecWire::Scan(DeltaScanExecWire::try_new(scan, Default::default())?),
                     "Scan",
                 )
             } else {
@@ -1052,7 +1072,7 @@ mod tests {
 
         let delta_scan = extract_delta_scan_exec(&plan).expect("Expected DeltaScanExec");
 
-        let codec = DeltaNextPhysicalCodec;
+        let codec = DeltaNextPhysicalCodec::default();
 
         let mut buf = Vec::new();
         codec.try_encode(plan.clone(), &mut buf, &DefaultPhysicalProtoConverter {})?;
@@ -1086,6 +1106,80 @@ mod tests {
         Ok(())
     }
 
+    #[rstest::rstest]
+    #[case::classic(false)]
+    #[case::next(true)]
+    #[tokio::test]
+    #[allow(deprecated)]
+    async fn test_codec_planning_metrics_follow_config(
+        #[case] next: bool,
+        #[values(true, false)] serialize_planning_metrics: bool,
+    ) -> TestResult {
+        use crate::delta_datafusion::{DeltaPhysicalCodec, table_provider::DeltaScan};
+        use datafusion::physical_plan::{empty::EmptyExec, metrics::MetricBuilder};
+
+        let plan: Arc<dyn ExecutionPlan> = if next {
+            create_delta_scan_exec(&[], None).await?
+        } else {
+            let schema = Arc::new(arrow::datatypes::Schema::empty());
+            let scan = DeltaScan::new(
+                &url::Url::parse("s3://my_bucket/table")?,
+                Default::default(),
+                Arc::new(EmptyExec::new(schema.clone())),
+                schema,
+            );
+            MetricBuilder::new(&scan.metrics)
+                .global_counter("files_scanned")
+                .add(4);
+            Arc::new(scan)
+        };
+        let config = DeltaPhysicalCodecConfig {
+            serialize_planning_metrics,
+        };
+        let codec: Box<dyn PhysicalExtensionCodec> = if next {
+            Box::new(DeltaNextPhysicalCodec::new(config))
+        } else {
+            Box::new(DeltaPhysicalCodec::new(config))
+        };
+        let metric_name = if next {
+            "count_files_scanned"
+        } else {
+            "files_scanned"
+        };
+        let planned = plan
+            .metrics()
+            .unwrap()
+            .sum_by_name(metric_name)
+            .unwrap()
+            .as_usize();
+        assert!(planned > 0);
+        let mut buf = Vec::new();
+        codec.try_encode(plan.clone(), &mut buf, &DefaultPhysicalProtoConverter {})?;
+        let wire: serde_json::Value = serde_json::from_slice(&buf)?;
+        let wire = if next { &wire["Scan"] } else { &wire };
+        assert_eq!(
+            wire.get("planning_count_metrics").is_some(),
+            serialize_planning_metrics
+        );
+
+        let inputs = plan.children().into_iter().cloned().collect::<Vec<_>>();
+        let decoded = codec.try_decode(
+            &buf,
+            &inputs,
+            &create_session().into_inner().task_ctx(),
+            &DefaultPhysicalProtoConverter {},
+        )?;
+        assert_eq!(
+            decoded
+                .metrics()
+                .unwrap()
+                .sum_by_name(metric_name)
+                .map(|value| value.as_usize()),
+            serialize_planning_metrics.then_some(planned),
+        );
+        Ok(())
+    }
+
     #[tokio::test]
     async fn test_codec_roundtrip_with_projection() -> TestResult {
         let projection = vec![0usize];
@@ -1093,7 +1187,7 @@ mod tests {
 
         let delta_scan = extract_delta_scan_exec(&plan).expect("Expected DeltaScanExec");
 
-        let codec = DeltaNextPhysicalCodec;
+        let codec = DeltaNextPhysicalCodec::default();
 
         let mut buf = Vec::new();
         codec.try_encode(plan.clone(), &mut buf, &DefaultPhysicalProtoConverter {})?;
@@ -1129,7 +1223,7 @@ mod tests {
 
         let delta_scan = extract_delta_scan_exec(&plan).expect("Expected DeltaScanExec");
 
-        let codec = DeltaNextPhysicalCodec;
+        let codec = DeltaNextPhysicalCodec::default();
 
         let mut buf = Vec::new();
         codec.try_encode(plan.clone(), &mut buf, &DefaultPhysicalProtoConverter {})?;
@@ -1159,7 +1253,7 @@ mod tests {
 
         let delta_scan = extract_delta_scan_exec(&plan).expect("Expected DeltaScanExec");
 
-        let wire = DeltaScanExecWire::try_from(delta_scan)?;
+        let wire = DeltaScanExecWire::try_new(delta_scan, Default::default())?;
 
         let json = serde_json::to_string(&wire)?;
         assert!(!json.is_empty(), "JSON should not be empty");
@@ -1186,7 +1280,7 @@ mod tests {
     async fn test_codec_decode_wrong_input_count() -> TestResult {
         let plan = create_delta_scan_exec(&[], None).await?;
 
-        let codec = DeltaNextPhysicalCodec;
+        let codec = DeltaNextPhysicalCodec::default();
 
         let mut buf = Vec::new();
         codec.try_encode(plan.clone(), &mut buf, &DefaultPhysicalProtoConverter {})?;
@@ -1264,7 +1358,7 @@ mod tests {
         let plan = create_delta_scan_exec_from_table(TestTables::WithDvSmall, &[], None).await?;
         let delta_scan = extract_delta_scan_exec(&plan).expect("Expected DeltaScanExec");
 
-        let wire = DeltaScanExecWire::try_from(delta_scan)?;
+        let wire = DeltaScanExecWire::try_new(delta_scan, Default::default())?;
 
         let json = serde_json::to_string(&wire)?;
         let deserialized: DeltaScanExecWire = serde_json::from_str(&json)?;
@@ -1282,7 +1376,7 @@ mod tests {
         let plan = create_delta_scan_exec(&[], None).await?;
         let delta_scan = extract_delta_scan_exec(&plan).expect("Expected DeltaScanExec");
 
-        let codec = DeltaNextPhysicalCodec;
+        let codec = DeltaNextPhysicalCodec::default();
 
         let mut buf = Vec::new();
         codec.try_encode(plan.clone(), &mut buf, &DefaultPhysicalProtoConverter {})?;
@@ -1321,7 +1415,7 @@ mod tests {
             "Table with deletion vectors should have physical deletion-vector state"
         );
 
-        let codec = DeltaNextPhysicalCodec;
+        let codec = DeltaNextPhysicalCodec::default();
 
         let mut buf = Vec::new();
         codec.try_encode(plan.clone(), &mut buf, &DefaultPhysicalProtoConverter {})?;
@@ -1355,7 +1449,7 @@ mod tests {
 
         // Column mapping tables have transforms that inject partition values.
         // This test verifies full roundtrip serialization of Transform expressions.
-        let codec = DeltaNextPhysicalCodec;
+        let codec = DeltaNextPhysicalCodec::default();
 
         let mut buf = Vec::new();
         codec.try_encode(plan.clone(), &mut buf, &DefaultPhysicalProtoConverter {})?;
@@ -1384,7 +1478,7 @@ mod tests {
             create_delta_scan_meta_exec_from_table(TestTables::WithColumnMapping, &[]).await?;
         let meta_scan = extract_delta_scan_meta_exec(&plan).expect("Expected DeltaScanMetaExec");
 
-        let codec = DeltaNextPhysicalCodec;
+        let codec = DeltaNextPhysicalCodec::default();
 
         let mut buf = Vec::new();
         codec.try_encode(plan.clone(), &mut buf, &DefaultPhysicalProtoConverter {})?;
@@ -1428,7 +1522,7 @@ mod tests {
             create_delta_scan_meta_exec_from_table(TestTables::WithColumnMapping, &filters).await?;
         let meta_scan = extract_delta_scan_meta_exec(&plan).expect("Expected DeltaScanMetaExec");
 
-        let codec = DeltaNextPhysicalCodec;
+        let codec = DeltaNextPhysicalCodec::default();
 
         let mut buf = Vec::new();
         codec.try_encode(plan.clone(), &mut buf, &DefaultPhysicalProtoConverter {})?;
@@ -1467,7 +1561,7 @@ mod tests {
             "Table with deletion vectors should have non-empty selection_vectors"
         );
 
-        let codec = DeltaNextPhysicalCodec;
+        let codec = DeltaNextPhysicalCodec::default();
 
         let mut buf = Vec::new();
         codec.try_encode(plan.clone(), &mut buf, &DefaultPhysicalProtoConverter {})?;
@@ -1515,7 +1609,7 @@ mod tests {
             create_delta_scan_meta_exec_from_table(TestTables::WithColumnMapping, &[]).await?;
         let meta_scan = extract_delta_scan_meta_exec(&plan).expect("Expected DeltaScanMetaExec");
 
-        let codec = DeltaNextPhysicalCodec;
+        let codec = DeltaNextPhysicalCodec::default();
 
         let mut buf = Vec::new();
         codec.try_encode(plan.clone(), &mut buf, &DefaultPhysicalProtoConverter {})?;
@@ -1547,7 +1641,7 @@ mod tests {
             Arc::new(CrossJoinExec::new(scan_plan.clone(), meta_plan.clone()))
         };
 
-        let codec = DeltaNextPhysicalCodec;
+        let codec = DeltaNextPhysicalCodec::default();
         let proto = protobuf::PhysicalPlanNode::try_from_physical_plan(join.clone(), &codec)?;
 
         let session = create_session().into_inner();
