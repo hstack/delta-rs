@@ -22,6 +22,9 @@ use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
+use crate::delta_datafusion::planning_count_metrics_codec::{
+    DeltaPhysicalCodecConfig, PlanningCountMetricsWire,
+};
 use crate::delta_datafusion::table_provider::next::SnapshotWrapper;
 use crate::delta_datafusion::{DataFusionMixins as _, FindFilesExprProperties};
 use crate::kernel::{Add, EagerSnapshot, Snapshot, Version};
@@ -569,26 +572,36 @@ pub(super) struct DeltaScanWire {
     pub(crate) table_url: Url,
     pub(crate) config: DeltaScanConfig,
     pub(crate) logical_schema: Arc<Schema>,
+    #[serde(default, skip_serializing_if = "PlanningCountMetricsWire::is_empty")]
+    pub(crate) planning_count_metrics: PlanningCountMetricsWire,
 }
 
-impl From<&DeltaScan> for DeltaScanWire {
-    fn from(scan: &DeltaScan) -> Self {
+impl DeltaScanWire {
+    pub(super) fn new(scan: &DeltaScan, codec_config: DeltaPhysicalCodecConfig) -> Self {
         Self {
             table_url: scan.table_url.clone(),
             config: scan.config.clone(),
             logical_schema: scan.logical_schema.clone(),
+            planning_count_metrics: PlanningCountMetricsWire::encode(
+                &scan.metrics.clone_inner(),
+                codec_config,
+            ),
         }
     }
-}
 
-impl DeltaScanWire {
-    pub(super) fn into_delta_scan(self, parquet_scan: Arc<dyn ExecutionPlan>) -> DeltaScan {
-        DeltaScan::new(
+    pub(super) fn into_delta_scan(
+        self,
+        parquet_scan: Arc<dyn ExecutionPlan>,
+        codec_config: DeltaPhysicalCodecConfig,
+    ) -> DeltaScan {
+        let mut scan = DeltaScan::new(
             &self.table_url,
             self.config,
             parquet_scan,
             self.logical_schema,
-        )
+        );
+        scan.metrics = self.planning_count_metrics.decode(codec_config);
+        scan
     }
 }
 
@@ -626,12 +639,13 @@ impl ExecutionPlan for DeltaScan {
                 children.len()
             )));
         }
-        Ok(Arc::new(DeltaScan::new(
-            &self.table_url,
-            self.config.clone(),
-            Arc::clone(&children[0]),
-            Arc::clone(&self.logical_schema),
-        )))
+        Ok(Arc::new(DeltaScan {
+            table_url: self.table_url.clone(),
+            config: self.config.clone(),
+            parquet_scan: Arc::clone(&children[0]),
+            logical_schema: Arc::clone(&self.logical_schema),
+            metrics: self.metrics.clone(),
+        }))
     }
 
     fn with_new_children(
@@ -791,6 +805,38 @@ mod tests {
         use datafusion::prelude::SessionConfig;
         let config = SessionConfig::new();
         Arc::new(SessionStateBuilder::new().with_config(config).build())
+    }
+
+    #[test]
+    fn test_delta_scan_replace_children_preserves_planning_counts() {
+        use datafusion::physical_plan::{empty::EmptyExec, metrics::MetricBuilder};
+
+        let schema = Arc::new(Schema::empty());
+        let scan = Arc::new(DeltaScan::new(
+            &Url::parse("memory:///table").unwrap(),
+            DeltaScanConfig::default(),
+            Arc::new(EmptyExec::new(schema.clone())),
+            schema.clone(),
+        ));
+        MetricBuilder::new(&scan.metrics)
+            .global_counter("files_scanned")
+            .add(4);
+        MetricBuilder::new(&scan.metrics)
+            .global_counter("files_pruned")
+            .add(2);
+        let replacement: Arc<dyn ExecutionPlan> = Arc::new(EmptyExec::new(schema));
+
+        let rewritten = scan
+            .replace_children(
+                vec![replacement.clone()],
+                ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+            )
+            .unwrap();
+
+        assert!(Arc::ptr_eq(rewritten.children()[0], &replacement));
+        let metrics = rewritten.metrics().unwrap();
+        assert_eq!(metrics.sum_by_name("files_scanned").unwrap().as_usize(), 4);
+        assert_eq!(metrics.sum_by_name("files_pruned").unwrap().as_usize(), 2);
     }
 
     #[test]
