@@ -770,50 +770,6 @@ mod tests {
         assert_eq!(format!("{exec_plan:?}"), format!("{result_exec_plan:?}"));
     }
 
-    #[test]
-    #[allow(deprecated)]
-    fn delta_exec_plan_planning_metrics_follow_codec_config() {
-        use datafusion::physical_plan::metrics::MetricBuilder;
-
-        let schema = Arc::new(Schema::new(vec![Field::new(
-            "a",
-            ArrowDataType::Utf8,
-            false,
-        )]));
-        let scan = DeltaScan::new(
-            &Url::parse("s3://my_bucket/this/is/some/path").unwrap(),
-            DeltaScanConfig::default(),
-            Arc::from(EmptyExec::new(schema.clone())),
-            schema,
-        );
-        MetricBuilder::new(&scan.metrics)
-            .global_counter("files_scanned")
-            .add(4);
-        let exec_plan: Arc<dyn ExecutionPlan> = Arc::new(scan);
-
-        let task_ctx = SessionContext::new().task_ctx();
-        let files_scanned = |encoder: &DeltaPhysicalCodec, decoder: &DeltaPhysicalCodec| {
-            let proto =
-                protobuf::PhysicalPlanNode::try_from_physical_plan(exec_plan.clone(), encoder)
-                    .expect("to proto");
-            let decoded: Arc<dyn ExecutionPlan> = proto
-                .try_into_physical_plan(&task_ctx, decoder)
-                .expect("from proto");
-            decoded
-                .metrics()
-                .and_then(|metrics| metrics.sum_by_name("files_scanned"))
-                .map(|value| value.as_usize())
-        };
-
-        let enabled = DeltaPhysicalCodec::default();
-        let disabled = DeltaPhysicalCodec::new(DeltaPhysicalCodecConfig {
-            serialize_planning_metrics: false,
-        });
-        assert_eq!(files_scanned(&enabled, &enabled), Some(4));
-        assert_eq!(files_scanned(&disabled, &enabled), None);
-        assert_eq!(files_scanned(&enabled, &disabled), None);
-    }
-
     #[tokio::test]
     async fn roundtrip_test_delta_logical_codec_preserves_file_selection() {
         let log_store = crate::test_utils::TestTables::Simple

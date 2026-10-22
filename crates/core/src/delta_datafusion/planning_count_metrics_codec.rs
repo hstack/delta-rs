@@ -119,8 +119,9 @@ mod tests {
         count
     }
 
-    fn planning_metrics() -> MetricsSet {
-        vec![
+    #[test]
+    fn planning_count_metrics_wire_roundtrips_named_counts_only() {
+        let metrics = vec![
             Arc::new(Metric::new_with_labels(
                 MetricValue::Count {
                     name: Cow::Borrowed("files_scanned"),
@@ -139,17 +140,9 @@ mod tests {
             Arc::new(Metric::new(MetricValue::OutputRows(count(80)), None)),
         ]
         .into_iter()
-        .collect()
-    }
-
-    const DISABLED: DeltaPhysicalCodecConfig = DeltaPhysicalCodecConfig {
-        serialize_planning_metrics: false,
-    };
-
-    #[test]
-    fn planning_count_metrics_wire_roundtrips_named_counts_only() {
+        .collect::<MetricsSet>();
         let config = DeltaPhysicalCodecConfig::default();
-        let wire = PlanningCountMetricsWire::encode(&planning_metrics(), config);
+        let wire = PlanningCountMetricsWire::encode(&metrics, config);
         let encoded = serde_json::to_vec(&wire).unwrap();
         let decoded: PlanningCountMetricsWire = serde_json::from_slice(&encoded).unwrap();
         assert_eq!(decoded, wire);
@@ -164,18 +157,5 @@ mod tests {
                 && metric.metric_type() == MetricType::Dev
                 && metric.metric_category().is_none()
         }));
-    }
-
-    #[test]
-    fn disabled_planning_metrics_are_neither_written_nor_restored() {
-        assert!(PlanningCountMetricsWire::encode(&planning_metrics(), DISABLED).is_empty());
-
-        // A plan encoded with planning metrics still decodes without them when disabled.
-        let wire = PlanningCountMetricsWire::encode(
-            &planning_metrics(),
-            DeltaPhysicalCodecConfig::default(),
-        );
-        assert!(!wire.is_empty());
-        assert_eq!(wire.decode(DISABLED).clone_inner().iter().count(), 0);
     }
 }

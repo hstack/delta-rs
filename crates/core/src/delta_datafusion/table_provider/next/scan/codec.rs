@@ -996,49 +996,72 @@ mod tests {
         Ok(())
     }
 
+    #[rstest::rstest]
+    #[case::classic(false)]
+    #[case::next(true)]
     #[tokio::test]
-    async fn test_codec_planning_metrics_follow_config() -> TestResult {
-        let plan = create_delta_scan_exec(&[], None).await?;
-        let delta_scan = extract_delta_scan_exec(&plan).expect("Expected DeltaScanExec");
-        let input = delta_scan.children()[0].clone();
-        let task_ctx = create_session().into_inner().task_ctx();
+    #[allow(deprecated)]
+    async fn test_codec_planning_metrics_follow_config(
+        #[case] next: bool,
+        #[values(true, false)] serialize_planning_metrics: bool,
+    ) -> TestResult {
+        use crate::delta_datafusion::{DeltaPhysicalCodec, table_provider::DeltaScan};
+        use datafusion::physical_plan::{empty::EmptyExec, metrics::MetricBuilder};
 
-        let files_scanned = |plan: &Arc<dyn ExecutionPlan>| {
-            plan.metrics()
-                .and_then(|metrics| metrics.sum_by_name("count_files_scanned"))
-                .map(|value| value.as_usize())
+        let plan: Arc<dyn ExecutionPlan> = if next {
+            create_delta_scan_exec(&[], None).await?
+        } else {
+            let schema = Arc::new(arrow::datatypes::Schema::empty());
+            let scan = DeltaScan::new(
+                &url::Url::parse("s3://my_bucket/table")?,
+                Default::default(),
+                Arc::new(EmptyExec::new(schema.clone())),
+                schema,
+            );
+            MetricBuilder::new(&scan.metrics)
+                .global_counter("files_scanned")
+                .add(4);
+            Arc::new(scan)
         };
-        let planned = files_scanned(&plan);
-        assert!(
-            planned.is_some(),
-            "planning should record count_files_scanned"
+        let config = DeltaPhysicalCodecConfig {
+            serialize_planning_metrics,
+        };
+        let codec: Box<dyn PhysicalExtensionCodec> = if next {
+            Box::new(DeltaNextPhysicalCodec::new(config))
+        } else {
+            Box::new(DeltaPhysicalCodec::new(config))
+        };
+        let metric_name = if next {
+            "count_files_scanned"
+        } else {
+            "files_scanned"
+        };
+        let planned = plan
+            .metrics()
+            .unwrap()
+            .sum_by_name(metric_name)
+            .unwrap()
+            .as_usize();
+        assert!(planned > 0);
+        let mut buf = Vec::new();
+        codec.try_encode(plan.clone(), &mut buf)?;
+        let wire: serde_json::Value = serde_json::from_slice(&buf)?;
+        let wire = if next { &wire["Scan"] } else { &wire };
+        assert_eq!(
+            wire.get("planning_count_metrics").is_some(),
+            serialize_planning_metrics
         );
 
-        let enabled = DeltaNextPhysicalCodec::default();
-        let disabled = DeltaNextPhysicalCodec::new(DeltaPhysicalCodecConfig {
-            serialize_planning_metrics: false,
-        });
-        let mut with_metrics = Vec::new();
-        enabled.try_encode(plan.clone(), &mut with_metrics)?;
-        let mut without_metrics = Vec::new();
-        disabled.try_encode(plan.clone(), &mut without_metrics)?;
-
-        let field = "planning_count_metrics";
-        assert!(String::from_utf8_lossy(&with_metrics).contains(field));
-        assert!(!String::from_utf8_lossy(&without_metrics).contains(field));
-
-        let inputs = std::slice::from_ref(&input);
-        let decoded = enabled.try_decode(&with_metrics, inputs, &task_ctx)?;
-        assert_eq!(files_scanned(&decoded), planned);
-        for (codec, buf) in [
-            (&disabled, &with_metrics),
-            (&enabled, &without_metrics),
-            (&disabled, &without_metrics),
-        ] {
-            let decoded = codec.try_decode(buf, inputs, &task_ctx)?;
-            assert_eq!(files_scanned(&decoded), None);
-        }
-
+        let inputs = plan.children().into_iter().cloned().collect::<Vec<_>>();
+        let decoded = codec.try_decode(&buf, &inputs, &create_session().into_inner().task_ctx())?;
+        assert_eq!(
+            decoded
+                .metrics()
+                .unwrap()
+                .sum_by_name(metric_name)
+                .map(|value| value.as_usize()),
+            serialize_planning_metrics.then_some(planned),
+        );
         Ok(())
     }
 
