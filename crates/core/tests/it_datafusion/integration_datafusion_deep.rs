@@ -115,7 +115,7 @@ async fn test_hstack_deep_column_pruning() -> datafusion::common::Result<()> {
     let codec = ComposedPhysicalExtensionCodec::new(
         vec![
             Arc::new(DefaultPhysicalExtensionCodec {}),
-            Arc::new(DeltaPhysicalCodec{})
+            Arc::new(DeltaPhysicalCodec::default())
         ]
     );
     let proto = PhysicalPlanNode::try_from_physical_plan(physical_plan.clone(), &codec)
@@ -235,7 +235,7 @@ async fn test_hstack_deep_column_pruning_next_codec() -> datafusion::common::Res
     let codec = ComposedPhysicalExtensionCodec::new(
         vec![
             Arc::new(DefaultPhysicalExtensionCodec {}),
-            Arc::new(DeltaNextPhysicalCodec{})
+            Arc::new(DeltaNextPhysicalCodec::default())
         ]
     );
 

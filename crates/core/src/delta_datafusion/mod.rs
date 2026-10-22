@@ -75,6 +75,7 @@ pub(crate) use data_validation::{
 };
 pub use engine::DataFusionEngine;
 pub(crate) use find_files::*;
+pub use planning_count_metrics_codec::DeltaPhysicalCodecConfig;
 pub(crate) use table_provider::next::normalize_path_as_file_id;
 pub use table_provider::{
     DeltaScanConfig, DeltaScanConfigBuilder, TableProviderBuilder, next::DeltaScanExec,
@@ -470,8 +471,18 @@ pub(crate) fn to_correct_scalar_value(
             Use DeltaLogicalCodec for table-provider serialization until a DeltaScanExec \
             physical codec is available."
 )]
-#[derive(Debug)]
-pub struct DeltaPhysicalCodec {}
+#[derive(Debug, Default)]
+pub struct DeltaPhysicalCodec {
+    config: DeltaPhysicalCodecConfig,
+}
+
+#[allow(deprecated)]
+impl DeltaPhysicalCodec {
+    /// Creates a codec with the given serialization options.
+    pub fn new(config: DeltaPhysicalCodecConfig) -> Self {
+        Self { config }
+    }
+}
 
 #[allow(deprecated)]
 impl PhysicalExtensionCodec for DeltaPhysicalCodec {
@@ -483,7 +494,7 @@ impl PhysicalExtensionCodec for DeltaPhysicalCodec {
     ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
         let wire: DeltaScanWire = serde_json::from_reader(buf)
             .map_err(|_| DataFusionError::Internal("Unable to decode DeltaScan".to_string()))?;
-        let delta_scan = wire.into_delta_scan((*inputs)[0].clone());
+        let delta_scan = wire.into_delta_scan((*inputs)[0].clone(), self.config);
         Ok(Arc::new(delta_scan))
     }
 
@@ -496,7 +507,7 @@ impl PhysicalExtensionCodec for DeltaPhysicalCodec {
             .downcast_ref::<DeltaScan>()
             .ok_or_else(|| DataFusionError::Internal("Not a legacy delta scan!".to_string()))?;
 
-        let wire = DeltaScanWire::from(delta_scan);
+        let wire = DeltaScanWire::new(delta_scan, self.config);
         serde_json::to_writer(buf, &wire).map_err(|_| {
             DataFusionError::Internal("Unable to encode legacy delta scan!".to_string())
         })?;
@@ -736,7 +747,7 @@ mod tests {
     #[allow(deprecated)]
     fn roundtrip_test_delta_exec_plan() {
         let ctx = SessionContext::new();
-        let codec = DeltaPhysicalCodec {};
+        let codec = DeltaPhysicalCodec::default();
 
         let schema = Arc::new(Schema::new(vec![
             Field::new("a", ArrowDataType::Utf8, false),
