@@ -1019,7 +1019,7 @@ impl Snapshot {
         {
             Ok(data) => data,
             Err(err) => {
-                return Box::pin(once(ready(Err(DeltaTableError::KernelError(err)))));
+                return Box::pin(once(ready(Err(err.into()))));
             }
         };
 
@@ -1231,7 +1231,7 @@ async fn read_last_checkpoint_version(
             .map_err(|e| DeltaTableError::Generic(e.to_string()))?;
         match storage.read_files(vec![(checkpoint_path, None)])?.next() {
             Some(Ok(data)) => Ok(parse_last_checkpoint_hint(&data).map(|hint| hint.version)),
-            Some(Err(delta_kernel::Error::FileNotFound(_))) => Ok(None),
+            Some(Err(delta_kernel::KernelError::FileNotFound(_))) => Ok(None),
             Some(Err(err)) => Err(err.into()),
             None => {
                 tracing::warn!("empty _last_checkpoint file");

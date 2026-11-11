@@ -5,7 +5,10 @@ use dashmap::DashMap;
 use dashmap::mapref::one::Ref;
 use datafusion::execution::TaskContext;
 use datafusion::execution::object_store::{ObjectStoreRegistry, ObjectStoreUrl};
-use delta_kernel::{DeltaResult, Error as DeltaError, FileMeta, FileSlice, StorageHandler};
+use delta_kernel::{
+    FileMeta, FileSlice, KernelError as DeltaError, KernelResult as DeltaResult,
+    KernelResultIteratorStatic, StorageHandler,
+};
 use delta_kernel_default_engine::executor::tokio::{
     TokioBackgroundExecutor, TokioMultiThreadExecutor,
 };
@@ -68,18 +71,12 @@ impl DataFusionStorageHandler {
 }
 
 impl StorageHandler for DataFusionStorageHandler {
-    fn list_from(
-        &self,
-        path: &Url,
-    ) -> DeltaResult<Box<dyn Iterator<Item = DeltaResult<FileMeta>>>> {
+    fn list_from(&self, path: &Url) -> DeltaResult<KernelResultIteratorStatic<FileMeta>> {
         self.get_or_create(path.as_object_store_url())?
             .list_from(path)
     }
 
-    fn read_files(
-        &self,
-        files: Vec<FileSlice>,
-    ) -> DeltaResult<Box<dyn Iterator<Item = DeltaResult<Bytes>>>> {
+    fn read_files(&self, files: Vec<FileSlice>) -> DeltaResult<KernelResultIteratorStatic<Bytes>> {
         let grouped_files = group_by_store(files);
         Ok(Box::new(
             grouped_files
@@ -96,7 +93,7 @@ impl StorageHandler for DataFusionStorageHandler {
 
     fn copy_atomic(&self, _from: &Url, _to: &Url) -> DeltaResult<()> {
         // TODO: Implement atomic copy operation
-        Err(delta_kernel::Error::generic("copy_atomic not implemented"))
+        Err(DeltaError::generic("copy_atomic not implemented"))
     }
 
     fn put(&self, path: &Url, data: Bytes, overwrite: bool) -> DeltaResult<()> {
@@ -106,7 +103,7 @@ impl StorageHandler for DataFusionStorageHandler {
 
     fn head(&self, _path: &Url) -> DeltaResult<FileMeta> {
         // TODO: Implement atomic copy operation
-        Err(delta_kernel::Error::generic("head not implemented"))
+        Err(DeltaError::generic("head not implemented"))
     }
     fn delete(&self, _: &Url) -> DeltaResult<()> {
         todo!("delete is not implemented");

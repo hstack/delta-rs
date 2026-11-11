@@ -21,7 +21,7 @@ use delta_kernel::table_configuration::TableConfiguration;
 use delta_kernel::table_features::ColumnMappingMode;
 use delta_kernel::table_properties::{DataSkippingNumIndexedCols, TableProperties};
 use delta_kernel::transforms::{SchemaTransform, transform_output_type};
-use delta_kernel::{DeltaResult, ExpressionEvaluator};
+use delta_kernel::{ExpressionEvaluator, KernelResult};
 
 use crate::errors::{DeltaResult as DeltaResultLocal, DeltaTableError};
 use crate::kernel::{SCAN_ROW_ARROW_SCHEMA, StatsProjection};
@@ -32,7 +32,7 @@ use crate::kernel::{SCAN_ROW_ARROW_SCHEMA, StatsProjection};
 /// Some of this may eventually be upstreamed as the kernel implementation matures.
 pub(crate) trait SnapshotExt {
     /// Returns the expected file statistics schema for the snapshot.
-    fn stats_schema(&self) -> DeltaResult<SchemaRef>;
+    fn stats_schema(&self) -> KernelResult<SchemaRef>;
 
     /// The expected schema for partition values
     fn partitions_schema(&self) -> DeltaResultLocal<Option<SchemaRef>>;
@@ -45,7 +45,7 @@ pub(crate) trait SnapshotExt {
 }
 
 impl SnapshotExt for TableConfiguration {
-    fn stats_schema(&self) -> DeltaResult<SchemaRef> {
+    fn stats_schema(&self) -> KernelResult<SchemaRef> {
         let (source_schema, table_properties) = stats_inputs(self)?;
         Ok(Arc::new(stats_schema(
             &source_schema,
@@ -67,7 +67,7 @@ impl SnapshotExt for TableConfiguration {
 }
 
 impl SnapshotExt for Snapshot {
-    fn stats_schema(&self) -> DeltaResult<SchemaRef> {
+    fn stats_schema(&self) -> KernelResult<SchemaRef> {
         self.table_configuration().stats_schema()
     }
 
@@ -129,7 +129,7 @@ fn partitions_schema(
 /// Partition columns are excluded from the returned schema; see [`stats_source_schema`].
 pub(crate) fn stats_inputs(
     table_configuration: &TableConfiguration,
-) -> DeltaResult<(StructType, Cow<'_, TableProperties>)> {
+) -> KernelResult<(StructType, Cow<'_, TableProperties>)> {
     let source_schema = stats_source_schema(
         table_configuration.logical_schema().as_ref(),
         table_configuration.metadata().partition_columns(),
@@ -153,12 +153,12 @@ fn stats_source_schema(
     logical_schema: &StructType,
     partition_columns: &[String],
     column_mapping_mode: ColumnMappingMode,
-) -> DeltaResult<StructType> {
+) -> KernelResult<StructType> {
     let fields = logical_schema
         .fields()
         .filter(|field| !partition_columns.contains(field.name()))
         .map(|field| field.make_physical(column_mapping_mode))
-        .collect::<DeltaResult<Vec<_>>>()?;
+        .collect::<KernelResult<Vec<_>>>()?;
     StructType::try_new(fields)
 }
 
@@ -502,7 +502,7 @@ pub(crate) fn is_public_min_max_stats_eligible_primitive(data_type: &PrimitiveTy
     ) || matches_nanos
 }
 
-pub(crate) fn rb_from_scan_meta(metadata: ScanMetadata) -> DeltaResult<RecordBatch> {
+pub(crate) fn rb_from_scan_meta(metadata: ScanMetadata) -> KernelResult<RecordBatch> {
     let (underlying_data, selection_vector) = metadata.scan_files.into_parts();
     let batch = ArrowEngineData::try_from_engine_data(underlying_data)?.into();
     Ok(filter_record_batch(
@@ -516,11 +516,11 @@ pub(crate) fn rb_from_scan_meta(metadata: ScanMetadata) -> DeltaResult<RecordBat
 /// Provides conversion between Arrow [`RecordBatch`]es and
 /// Kernel's [`ArrowEngineData`].
 pub(crate) trait ExpressionEvaluatorExt {
-    fn evaluate_arrow(&self, batch: RecordBatch) -> DeltaResult<RecordBatch>;
+    fn evaluate_arrow(&self, batch: RecordBatch) -> KernelResult<RecordBatch>;
 }
 
 impl<T: ExpressionEvaluator + ?Sized> ExpressionEvaluatorExt for T {
-    fn evaluate_arrow(&self, batch: RecordBatch) -> DeltaResult<RecordBatch> {
+    fn evaluate_arrow(&self, batch: RecordBatch) -> KernelResult<RecordBatch> {
         let engine_data = ArrowEngineData::new(batch);
         Ok(ArrowEngineData::try_from_engine_data(T::evaluate(self, &engine_data)?)?.into())
     }

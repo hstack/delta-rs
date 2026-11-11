@@ -241,6 +241,12 @@ pub enum DeltaTableError {
     },
 }
 
+impl From<delta_kernel::KernelError> for DeltaTableError {
+    fn from(error: delta_kernel::KernelError) -> Self {
+        Self::KernelError(delta_kernel::Error::Kernel(error))
+    }
+}
+
 impl From<object_store::path::Error> for DeltaTableError {
     fn from(err: object_store::path::Error) -> Self {
         Self::GenericError {
@@ -279,5 +285,23 @@ impl DeltaTableError {
             mode,
             operation: operation.to_string(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kernel_error_conversion_preserves_error_details() {
+        let error = delta_kernel::KernelError::FileNotFound("missing.json".to_string());
+        let error = DeltaTableError::from(error);
+
+        assert!(matches!(
+            error,
+            DeltaTableError::KernelError(delta_kernel::Error::Kernel(
+                delta_kernel::KernelError::FileNotFound(path)
+            )) if path == "missing.json"
+        ));
     }
 }
