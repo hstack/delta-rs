@@ -11,6 +11,7 @@ use url::Url;
 
 use super::normalize_table_url;
 use crate::kernel::Version;
+use crate::kernel::size_limits::LogSizeLimiter;
 use crate::logstore::storage::IORuntime;
 use crate::logstore::{LogStoreRef, StorageConfig, object_store_factories};
 use crate::{DeltaResult, DeltaTable, DeltaTableError};
@@ -78,6 +79,12 @@ impl DeltaTableBuilder {
         self
     }
 
+    /// Limit the total size of checkpoint and commit files loaded for a snapshot.
+    pub fn with_log_size_limiter(mut self, limiter: LogSizeLimiter) -> Self {
+        limiter.write_storage_options(self.storage_options.get_or_insert_with(HashMap::new));
+        self
+    }
+
     /// specify the timestamp given as ISO-8601/RFC-3339 timestamp
     pub fn with_datestring(self, date_string: impl AsRef<str>) -> DeltaResult<Self> {
         let datetime = DateTime::<Utc>::from(DateTime::<FixedOffset>::parse_from_rfc3339(
@@ -128,6 +135,14 @@ impl DeltaTableBuilder {
                 .clone()
                 .into_iter()
                 .map(|(k, v)| {
+                    (
+                        k.strip_prefix("deltalake.")
+                            .map(ToString::to_string)
+                            .unwrap_or(k),
+                        v,
+                    )
+                })
+                .map(|(k, v)| {
                     let needs_trim = v.starts_with("http://")
                         || v.starts_with("https://")
                         || k.to_lowercase().ends_with("_url");
@@ -172,7 +187,12 @@ impl DeltaTableBuilder {
     pub fn build_storage(&self) -> DeltaResult<LogStoreRef> {
         debug!("build_storage() with {}", self.table_url);
 
-        let mut storage_config = StorageConfig::parse_options(self.storage_options())?;
+        let raw_options = self.storage_options();
+        let mut storage_options = raw_options.clone();
+        LogSizeLimiter::from_storage_options(&mut storage_options)?;
+        let mut storage_config = StorageConfig::parse_options(storage_options)?;
+        // Retain table-load options for snapshot loading and log store serialization.
+        storage_config.raw = raw_options;
         if let Some(io_runtime) = self.io_runtime.clone() {
             storage_config = storage_config.with_io_runtime(io_runtime);
         }
@@ -367,6 +387,7 @@ pub fn ensure_table_uri(table_uri: impl AsRef<str>) -> DeltaResult<Url> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::logstore::LogStoreExt;
     use crate::logstore::factories::DefaultObjectStoreFactory;
 
     #[test]
@@ -529,6 +550,70 @@ mod tests {
                 .with_storage_options(storage_opts);
             let found_opts = table.storage_options();
             assert_eq!(expected, found_opts.get(key).unwrap());
+        }
+    }
+
+    #[test]
+    fn test_invalid_log_size_limiter_options_return_errors() {
+        for (key, value) in [
+            ("size_limit", "invalid"),
+            ("size_limit", "0"),
+            ("use_truncated_commit_log", "invalid"),
+            ("truncated_commit_log_size", "invalid"),
+        ] {
+            let result = DeltaTableBuilder::from_url(Url::parse("memory:///").unwrap())
+                .unwrap()
+                .with_storage_options(HashMap::from([(
+                    format!("log_size_limiter.{key}"),
+                    value.to_owned(),
+                )]))
+                .build();
+            assert!(result.is_err(), "{key}={value} must be rejected");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_log_size_limiter_truncates_after_table_roundtrip() -> DeltaResult<()> {
+        let path = crate::test_utils::TestTables::Simple.as_path();
+        let url = Url::from_directory_path(path.canonicalize().unwrap()).unwrap();
+        let table = DeltaTableBuilder::from_url(url)?
+            .with_log_size_limiter(LogSizeLimiter::try_new(4096, Some(1))?)
+            .build()?;
+        assert!(
+            !table
+                .log_store()
+                .config()
+                .options()
+                .unknown_properties
+                .contains_key("log_size_limiter.size_limit")
+        );
+        let mut table: DeltaTable = serde_json::from_str(&serde_json::to_string(&table)?)?;
+        table.load().await?;
+        let state = table.state.as_ref().unwrap();
+        let segment = state.snapshot().snapshot().inner.log_segment();
+        assert_eq!(table.version(), Some(4));
+        assert_eq!(segment.listed.ascending_commit_files.len(), 1);
+        assert_eq!(segment.listed.ascending_commit_files[0].version, 4);
+        assert!(segment.listed.checkpoint_parts.is_empty());
+        assert_eq!(segment.log_root, table.log_store().log_root_url());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_log_size_limiter_rejects_oversized_table_load() {
+        let path = crate::test_utils::TestTables::Simple.as_path();
+        let url = Url::from_directory_path(path.canonicalize().unwrap()).unwrap();
+        for prefix in ["", "deltalake."] {
+            let result = DeltaTableBuilder::from_url(url.clone())
+                .unwrap()
+                .with_storage_options(HashMap::from([(
+                    format!("{prefix}log_size_limiter.size_limit"),
+                    "1".into(),
+                )]))
+                .load()
+                .await;
+            let error = result.expect_err("oversized table must be rejected");
+            assert!(error.to_string().contains("exceeds maximum allowed size"));
         }
     }
 

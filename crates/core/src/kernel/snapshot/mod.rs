@@ -61,6 +61,7 @@ mod iterators;
 mod log_data;
 mod scan;
 mod serde;
+pub mod size_limits;
 mod stats_projection;
 mod stream;
 
@@ -210,12 +211,23 @@ impl Snapshot {
         table_root: Url,
         version: Option<Version>,
     ) -> DeltaResult<Self> {
+        Self::try_new_with_engine_and_limiter(engine, table_root, version, None).await
+    }
+
+    async fn try_new_with_engine_and_limiter(
+        engine: Arc<dyn Engine>,
+        table_root: Url,
+        version: Option<Version>,
+        limiter: Option<&size_limits::LogSizeLimiter>,
+    ) -> DeltaResult<Self> {
+        let task_engine = engine.clone();
+        let task_root = table_root.clone();
         let snapshot = match spawn_blocking_with_span(move || {
-            let mut builder = KernelSnapshot::builder_for(table_root);
+            let mut builder = KernelSnapshot::builder_for(task_root);
             if let Some(version) = version {
                 builder = builder.at_version(version);
             }
-            builder.build(engine.as_ref())
+            builder.build(task_engine.as_ref())
         })
         .await
         .map_err(|e| DeltaTableError::Generic(e.to_string()))?
@@ -230,6 +242,14 @@ impl Snapshot {
                 }
             }
         };
+
+        let (snapshot, _load_metrics) = size_limits::apply_optional_log_limiter(
+            snapshot,
+            limiter,
+            engine.as_ref(),
+            &table_root,
+        )
+        .await?;
 
         Ok(Self {
             inner: snapshot,
@@ -250,7 +270,10 @@ impl Snapshot {
             table_root.set_path(&format!("{}/", table_root.path()));
         }
 
-        Self::try_new_with_engine(engine, table_root, version).await
+        let limiter = size_limits::LogSizeLimiter::from_storage_options(
+            &mut log_store.config().options().raw.clone(),
+        )?;
+        Self::try_new_with_engine_and_limiter(engine, table_root, version, limiter.as_ref()).await
     }
 
     /// Create a [`ScanBuilder`] borrowing this snapshot to configure a read of the table.
