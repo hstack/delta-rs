@@ -65,6 +65,7 @@ mod scan;
 mod serde;
 mod stats_projection;
 mod stream;
+pub mod size_limits;
 
 pub(crate) static SCAN_ROW_ARROW_SCHEMA: LazyLock<arrow_schema::SchemaRef> =
     LazyLock::new(|| Arc::new(scan_row_schema().as_ref().try_into_arrow().unwrap()));
