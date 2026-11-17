@@ -121,7 +121,7 @@ impl IntoIterator for LogDataHandler<'_> {
 #[cfg(feature = "datafusion")]
 mod datafusion {
     use std::collections::HashSet;
-    use std::sync::{Arc, LazyLock};
+    use std::sync::Arc;
 
     use ::datafusion::common::Column;
     use ::datafusion::common::scalar::ScalarValue;
@@ -130,9 +130,10 @@ mod datafusion {
     use arrow_array::{Array, StringArray};
     use arrow_array::{ArrayRef, BooleanArray, UInt64Array};
     use arrow_schema::DataType as ArrowDataType;
+    use delta_kernel::EvaluationHandler;
+    use delta_kernel::engine::arrow_conversion::TryIntoKernel as _;
     use delta_kernel::expressions::Expression;
     use delta_kernel::schema::{DataType, PrimitiveType};
-    use delta_kernel::{EvaluationHandler, ExpressionEvaluator};
     use itertools::Itertools;
 
     use super::*;
@@ -159,11 +160,23 @@ mod datafusion {
             } else {
                 Expression::column(["stats_parsed", stats_field, &column.name])
             };
+            let data_type = if stats_field == "nullCount" {
+                DataType::LONG
+            } else {
+                field.data_type().clone()
+            };
             let evaluator = ARROW_HANDLER
                 .new_expression_evaluator(
-                    crate::kernel::models::fields::log_schema_ref().clone(),
+                    Arc::new(
+                        self.data
+                            .first()?
+                            .schema()
+                            .as_ref()
+                            .try_into_kernel()
+                            .ok()?,
+                    ),
                     expression.into(),
-                    field.data_type().clone(),
+                    data_type,
                 )
                 .ok()?;
 
@@ -206,7 +219,14 @@ mod datafusion {
             let expression = Expression::column(["partitionValues_parsed", &column.name]);
             let evaluator = ARROW_HANDLER
                 .new_expression_evaluator(
-                    crate::kernel::models::fields::log_schema_ref().clone(),
+                    Arc::new(
+                        self.data
+                            .first()?
+                            .schema()
+                            .as_ref()
+                            .try_into_kernel()
+                            .ok()?,
+                    ),
                     expression.into(),
                     field.data_type().clone(),
                 )
@@ -340,21 +360,26 @@ mod datafusion {
         ///
         /// Note: the returned array must contain `num_containers()` rows
         fn row_counts(&self) -> Option<ArrayRef> {
-            static ROW_COUNTS_EVAL: LazyLock<Arc<dyn ExpressionEvaluator>> = LazyLock::new(|| {
-                ARROW_HANDLER
-                    .new_expression_evaluator(
-                        crate::kernel::models::fields::log_schema_ref().clone(),
-                        Expression::column(["add", "stats_parsed", "numRecords"]).into(),
-                        DataType::Primitive(PrimitiveType::Long),
-                    )
-                    .expect("Failed to create row counts evaluator")
-            });
+            let evaluator = ARROW_HANDLER
+                .new_expression_evaluator(
+                    Arc::new(
+                        self.data
+                            .first()?
+                            .schema()
+                            .as_ref()
+                            .try_into_kernel()
+                            .ok()?,
+                    ),
+                    Expression::column(["stats_parsed", "numRecords"]).into(),
+                    DataType::LONG,
+                )
+                .ok()?;
 
             let results: Vec<_> = self
                 .data
                 .iter()
                 .map(|data| -> DeltaResult<_> {
-                    let batch = ROW_COUNTS_EVAL.evaluate_arrow(data.clone())?;
+                    let batch = evaluator.evaluate_arrow(data.clone())?;
                     Ok(arrow_cast::cast(batch.column(0), &ArrowDataType::UInt64)?)
                 })
                 .try_collect()
@@ -492,7 +517,136 @@ mod tests {
 
 #[cfg(all(test, feature = "datafusion"))]
 mod df_tests {
+    use std::collections::{HashMap, HashSet};
+
+    use arrow_array::{Array, Int32Array, StringArray, UInt64Array};
+    use datafusion::common::{Column, ScalarValue};
+    use datafusion::physical_optimizer::pruning::PruningStatistics;
+    use datafusion::prelude::{col, lit};
     use futures::TryStreamExt;
+
+    use crate::delta_datafusion::files_matching_predicate;
+    use crate::kernel::{Action, DataType, StructField, StructType};
+    use crate::table::state::DeltaTableState;
+    use crate::test_utils::ActionFactory;
+
+    async fn statistics_state() -> DeltaTableState {
+        let schema = StructType::try_new([
+            StructField::nullable("_ACP_DATE", DataType::STRING),
+            StructField::nullable("binary_partition", DataType::BINARY),
+            StructField::nullable("value", DataType::INTEGER),
+        ])
+        .unwrap();
+        let mut actions = vec![
+            ActionFactory::protocol(None, None, None::<Vec<_>>, None::<Vec<_>>).into(),
+            ActionFactory::metadata(&schema, Some(["_ACP_DATE", "binary_partition"]), None).into(),
+        ];
+        for (index, date) in [Some("2025-01-01"), Some("2025-01-02"), None]
+            .into_iter()
+            .enumerate()
+        {
+            let add = serde_json::from_value(serde_json::json!({
+                "path": format!("file-{index}.parquet"),
+                "size": 100,
+                "modificationTime": 0,
+                "dataChange": true,
+                "partitionValues": HashMap::from([
+                    ("_ACP_DATE", date),
+                    ("binary_partition", date.map(|_| "\\u0061")),
+                ]),
+                "stats": r#"{"numRecords":10,"minValues":{"value":1},"maxValues":{"value":9},"nullCount":{"value":2}}"#,
+            }))
+            .unwrap();
+            actions.push(Action::Add(add));
+        }
+        DeltaTableState::from_actions(actions).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn parsed_scan_row_partition_statistics() {
+        let state = statistics_state().await;
+        let log_data = state.log_data();
+        let column = Column::from_name("_ACP_DATE");
+        let expected: HashSet<_> = [Some("2025-01-01"), Some("2025-01-02"), None]
+            .into_iter()
+            .collect();
+
+        for stats in [log_data.min_values(&column), log_data.max_values(&column)] {
+            let stats = stats.expect("partition statistics must be available");
+            let stats = stats.as_any().downcast_ref::<StringArray>().unwrap();
+            assert_eq!(stats.len(), 3);
+            assert_eq!(stats.iter().collect::<HashSet<_>>(), expected);
+        }
+        let contained = log_data
+            .contained(&column, &HashSet::from([ScalarValue::from("2025-01-01")]))
+            .expect("partition membership statistics must be available");
+        assert_eq!(
+            contained
+                .iter()
+                .filter(|value| *value == Some(true))
+                .count(),
+            1
+        );
+
+        let counts = log_data.null_counts(&column).unwrap();
+        let counts = counts.as_any().downcast_ref::<UInt64Array>().unwrap();
+        assert_eq!(counts.iter().sum::<Option<u64>>(), Some(10));
+
+        let files =
+            files_matching_predicate(log_data, &[col("\"_ACP_DATE\"").gt_eq(lit("2025-01-01"))])
+                .unwrap()
+                .map(|file| file.path)
+                .collect::<HashSet<_>>();
+        assert_eq!(
+            files,
+            HashSet::from(["file-0.parquet".to_string(), "file-1.parquet".to_string()])
+        );
+    }
+
+    #[tokio::test]
+    async fn parsed_scan_row_data_statistics() {
+        let state = statistics_state().await;
+        let log_data = state.log_data();
+        let column = Column::from_name("value");
+        for (stats, expected) in [
+            (log_data.min_values(&column), 1),
+            (log_data.max_values(&column), 9),
+        ] {
+            let stats = stats.expect("data statistics must be available");
+            let stats = stats.as_any().downcast_ref::<Int32Array>().unwrap();
+            assert_eq!(stats.iter().collect::<Vec<_>>(), vec![Some(expected); 3]);
+        }
+        for (stats, expected) in [
+            (log_data.row_counts(), 10),
+            (log_data.null_counts(&column), 2),
+        ] {
+            let stats = stats.expect("count statistics must be available");
+            let stats = stats.as_any().downcast_ref::<UInt64Array>().unwrap();
+            assert_eq!(stats.iter().collect::<Vec<_>>(), vec![Some(expected); 3]);
+        }
+    }
+
+    #[tokio::test]
+    async fn parsed_scan_row_binary_partition_membership() {
+        let state = statistics_state().await;
+        let log_data = state.log_data();
+        let column = Column::from_name("binary_partition");
+        assert!(log_data.min_values(&column).is_none());
+        assert!(log_data.max_values(&column).is_none());
+        let contained = log_data
+            .contained(
+                &column,
+                &HashSet::from([ScalarValue::Binary(Some(b"b".to_vec()))]),
+            )
+            .expect("binary partition membership statistics must be available");
+        assert_eq!(
+            contained
+                .iter()
+                .filter(|value| *value == Some(true))
+                .count(),
+            1
+        );
+    }
 
     #[tokio::test]
     async fn read_delta_1_2_1_struct_stats_table() {
