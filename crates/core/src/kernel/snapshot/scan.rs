@@ -208,11 +208,8 @@ fn kernel_stats_options(
             StatsSourcePolicy::ParsedWithJsonFallback,
             RawStatsPolicy::Omit,
             StatsProjection::NumRecordsOnly,
-        ) => {
-            // Kernel 0.30 treats an empty struct projection as no statistics, including row counts.
-            StatsOptions::json_only()
-                .with_checkpoint_stats_json_fallback(checkpoint_stats_json_fallback)
-        }
+        ) => StatsOptions::struct_columns(vec![])
+            .with_checkpoint_stats_json_fallback(checkpoint_stats_json_fallback),
     }
 }
 
