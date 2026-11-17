@@ -260,14 +260,10 @@ impl Snapshot {
         .map_err(|e| DeltaTableError::Generic(e.to_string()))?
         {
             Ok(snapshot) => snapshot,
-            Err(e) => {
-                // TODO: we should have more handling-friendly errors upstream in kernel.
-                if e.to_string().contains("No files in log segment") {
-                    return Err(DeltaTableError::NotATable(e.to_string()));
-                } else {
-                    return Err(e.into());
-                }
+            Err(e @ delta_kernel::KernelError::EmptyLog) => {
+                return Err(DeltaTableError::NotATable(e.to_string()));
             }
+            Err(e) => return Err(e.into()),
         };
 
         let (snapshot, load_metrics) = size_limits::apply_optional_log_limiter(
@@ -1664,6 +1660,42 @@ mod tests {
             },
         },
     };
+
+    #[tokio::test]
+    async fn empty_log_snapshot_returns_not_a_table() -> TestResult {
+        let table = DeltaTable::new_in_memory();
+        let error = Snapshot::try_new(table.log_store().as_ref(), None)
+            .await
+            .expect_err("an empty log must not produce a snapshot");
+
+        assert!(matches!(error, DeltaTableError::NotATable(_)));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn empty_log_url_allows_creating_a_table() -> TestResult {
+        for with_storage_options in [false, true] {
+            let table_dir = TempDir::new()?;
+            let table_url = Url::from_directory_path(table_dir.path()).unwrap();
+            let table = if with_storage_options {
+                DeltaTable::try_from_url_with_storage_options(table_url, HashMap::new()).await?
+            } else {
+                DeltaTable::try_from_url(table_url).await?
+            };
+            assert_eq!(table.version(), None);
+
+            let table = table
+                .create()
+                .with_columns([StructField::new(
+                    "id",
+                    DataType::Primitive(PrimitiveType::Long),
+                    true,
+                )])
+                .await?;
+            assert_eq!(table.version(), Some(0));
+        }
+        Ok(())
+    }
 
     impl Snapshot {
         /// Build an in-memory snapshot from the given commits for use in tests.
