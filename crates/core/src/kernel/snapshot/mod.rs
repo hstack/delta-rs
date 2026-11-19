@@ -224,10 +224,10 @@ pub struct Snapshot {
     /// Log segment containing all log files in the snapshot
     pub inner: Arc<KernelSnapshot>,
     /// Optional materialized replay state owned by this snapshot.
-    materialized_files: Option<Arc<MaterializedFiles>>,
+    pub(crate) materialized_files: Option<Arc<MaterializedFiles>>,
     /// Metrics captured during snapshot loading
     pub(crate) load_metrics: SnapshotLoadMetrics,
-    checkpoint_stats_json_fallback: bool,
+    pub(crate) checkpoint_stats_json_fallback: bool,
 }
 
 impl Snapshot {

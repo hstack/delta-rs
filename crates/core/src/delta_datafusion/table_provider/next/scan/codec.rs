@@ -17,6 +17,7 @@ use crate::delta_datafusion::planning_count_metrics_codec::{
     DeltaPhysicalCodecConfig, PlanningCountMetricsWire,
 };
 use crate::kernel::Snapshot;
+use crate::kernel::size_limits::SnapshotLoadMetrics;
 use arrow::datatypes::SchemaRef;
 use dashmap::DashMap;
 use datafusion::common::HashMap;
@@ -279,7 +280,20 @@ pub(crate) struct ProjectedScanContractWire {
 
 /// Build the [`ScanPlanWire`] shared by both scan codecs.
 fn scan_plan_wire(scan_plan: &KernelScanPlan) -> Result<ScanPlanWire, DataFusionError> {
-    let snapshot = scan_plan.snapshot.clone();
+    let snapshot = {
+        let inner = Arc::clone(scan_plan.scan.snapshot());
+        // @HSTACK FIXME AT upgrade: review each snapshot setting here.
+        // The old loader applied its log size limit before planning. This loader does not.
+        // Do not send the planner's file cache. The physical plan already identifies the files.
+        // delta_table_next enables JSON fallback. The decoder needs it to rebuild the kernel scan.
+        let load_metrics = SnapshotLoadMetrics::from_snapshot(&inner);
+        Snapshot {
+            inner,
+            materialized_files: None,
+            load_metrics,
+            checkpoint_stats_json_fallback: scan_plan.snapshot.checkpoint_stats_json_fallback,
+        }
+    };
 
     let row_index_column = scan_plan
         .contract
@@ -624,6 +638,9 @@ impl DeltaScanExecWire {
 pub(crate) struct DeltaScanMetaExecWire {
     scan: ScanPlanWire,
     input: Vec<VecDeque<(String, usize)>>,
+    /// Maximum rows per partition. Older plans have no limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fetch: Option<usize>,
     transforms: TransformsWire,
     selection_vectors: std::collections::HashMap<String, Vec<bool>>,
     file_id_column: Option<String>,
@@ -654,6 +671,7 @@ impl TryFrom<&DeltaScanMetaExec> for DeltaScanMetaExecWire {
         Ok(Self {
             scan: scan_plan_wire,
             input: exec.input.clone(),
+            fetch: exec.fetch(),
             transforms,
             selection_vectors,
             file_id_column: exec.file_id_field.as_ref().map(|f| f.name().clone()),
@@ -736,7 +754,7 @@ impl DeltaScanMetaExecWire {
             }
         }
 
-        let exec = DeltaScanMetaExec::new(
+        let mut exec = DeltaScanMetaExec::new(
             Arc::new(scan_plan),
             self.input,
             Arc::new(transforms),
@@ -745,6 +763,7 @@ impl DeltaScanMetaExecWire {
             file_id_field,
             ExecutionPlanMetricsSet::new(),
         );
+        exec.fetch = self.fetch;
 
         Ok(Arc::new(exec))
     }
@@ -1058,6 +1077,32 @@ mod tests {
                 serde_json::to_value(provider_schema)?
             );
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_wire_snapshot_omits_cache_and_keeps_fallback() -> TestResult {
+        let store = TestTables::Simple
+            .table_builder()?
+            .with_checkpoint_stats_json_fallback(true)
+            .build_storage()?;
+        let cached = Arc::new(Snapshot::try_new(store.as_ref(), None).await?)
+            .ensure_materialized_files(store.as_ref())
+            .await?;
+        assert!(cached.try_materialized_log_data()?.num_files() > 0);
+        let mut plan = KernelScanPlan::try_new(&cached, None, &[], &DeltaScanConfig::new(), None)?;
+        // Make stale metrics visible if the codec copies the wrapper instead of the kernel state.
+        plan.snapshot.load_metrics = Default::default();
+        let wire = scan_plan_wire(&plan)?;
+        assert_eq!(wire.snapshot.load_metrics(), cached.load_metrics());
+        let json = serde_json::to_value(&wire)?;
+        let slots = json["snapshot"].as_array().expect("snapshot fields");
+        assert_eq!(slots.get(9), Some(&serde_json::Value::Null));
+        assert_eq!(slots.get(10), Some(&serde_json::Value::Bool(true)));
+        let decoded: ScanPlanWire = serde_json::from_value(json)?;
+        assert_eq!(decoded.snapshot.version(), cached.version());
+        assert!(decoded.snapshot.checkpoint_stats_json_fallback);
+        assert!(decoded.snapshot.materialized_files().is_none());
         Ok(())
     }
 
@@ -1687,6 +1732,39 @@ mod tests {
             "Exact row counts should match"
         );
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_meta_codec_roundtrip_with_fetch() -> TestResult {
+        use arrow_array::RecordBatch;
+        use datafusion::physical_plan::collect_partitioned;
+
+        let plan =
+            create_delta_scan_meta_exec_from_table(TestTables::WithColumnMapping, &[]).await?;
+        let task = create_session().into_inner().task_ctx();
+        let codec = DeltaNextPhysicalCodec::default();
+        let converter = DefaultPhysicalProtoConverter {};
+        let row_counts = |parts: Vec<Vec<RecordBatch>>| -> Vec<usize> {
+            parts.iter()
+                .map(|p| p.iter().map(RecordBatch::num_rows).sum())
+                .collect()
+        };
+        let counts = row_counts(collect_partitioned(plan.clone(), task.clone()).await?);
+        assert!(counts.iter().any(|&n| n > 1));
+
+        for limit in [None, Some(0), Some(1)] {
+            let capped = plan.with_fetch(limit).expect("metadata scans support fetch");
+            let mut buf = Vec::new();
+            codec.try_encode(capped, &mut buf, &converter)?;
+            let decoded = codec.try_decode(&buf, &[], &task, &converter)?;
+            let actual = row_counts(collect_partitioned(decoded.clone(), task.clone()).await?);
+            let expected: Vec<_> = counts.iter().map(|&n| n.min(limit.unwrap_or(n))).collect();
+            assert_eq!(actual, expected);
+            assert_eq!(decoded.fetch(), limit);
+            let json: serde_json::Value = serde_json::from_slice(&buf)?;
+            assert_eq!(json["Meta"].get("fetch").is_some(), limit.is_some());
+        }
         Ok(())
     }
 
